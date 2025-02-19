@@ -1,0 +1,37 @@
+// imports
+
+// variables
+
+    // screen size
+
+    // unicode string
+
+    // smooth scroll buffer size
+
+// split the unicode string into a list of unicode characters
+
+// back up the true order of the unicode characters so it can be restored later
+
+// pick out characters that have combining characters next to them (U+0300 - U+036F) 
+// and put them with their combining characters in another list. 
+
+// find the unique combining characters as well as how many times each one appears 
+// for each character with combining characters
+
+// calculate how many pixels of left, right up and down space each combining character 
+// will add to the resultant glyph
+
+// for each type of combining character that we found:
+
+    // divide the screen size by the number of pixels of left, right up and down 
+    // space each combining character will add to the resultant glyph and
+    // round whatever you get up to the nearest integer.
+
+    // add the smooth scroll buffer to the number that you get
+
+// the result of this should now be the number of each combining character that we want to
+// shape and then render the result of, such that overloaded combining characters will not
+// crash the editor
+
+// print these numbers to the console for now, so that i can test the implementation of this part.
+
