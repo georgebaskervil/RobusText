@@ -7,7 +7,7 @@ TARGET = main
 all: $(TARGET)
 
 $(TARGET): main.c debug.c unicode_processor.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $(TARGET) main.c debug.c unicode_processor.c sdl_window.c $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(TARGET) main.c debug.c unicode_processor.c sdl_window.c text_renderer.c $(LIBS)
 
 clean:
 	rm -f $(TARGET)
