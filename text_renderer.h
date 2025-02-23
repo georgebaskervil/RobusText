@@ -17,11 +17,19 @@ typedef struct {
     int textH;
     int *glyphByteOffsets;      // starting byte offset for each glyph
     int *clusterByteIndices;    // starting byte offset for each cluster
+    
+    // Line wrapping data
+    int *lineBreaks;            // Index of first cluster in each line
+    int *lineWidths;            // Width of each line
+    int numLines;               // Number of lines after wrapping
+    int lineHeight;             // Height of each line
+    int maxLineWidth;           // Maximum allowed line width
+    int baselineSkip;           // Distance between baselines of successive lines
 } RenderData;
 
-int get_glyph_width(TTF_Font *font, const char *utf8_seq, int len);
+// Add line wrapping parameter
 int update_render_data(SDL_Renderer *renderer, TTF_Font *font,
-                       const char *utf8_text, int margin, RenderData *rd);
+                      const char *utf8_text, int margin, int maxWidth, RenderData *rd);
 int get_glyph_index_at_cursor(const char *text, int byte_cursor);
 int get_cluster_index_at_cursor(const char *text, int byte_cursor, const int *clusterByteIndices, int numClusters);
 

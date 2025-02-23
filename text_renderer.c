@@ -3,6 +3,9 @@
 #include <string.h>
 #include <wchar.h>
 #include <math.h>
+#include "debug.h"
+#include <execinfo.h>
+#include <unistd.h>  // Add this for STDERR_FILENO
 
 // Maximum number of combining marks allowed per base character.
 #define MAX_COMBINING_PER_CLUSTER 5
@@ -39,116 +42,115 @@ int get_glyph_index_at_cursor(const char *text, int byte_cursor) {
 }
 
 int get_cluster_index_at_cursor(const char *text, int byte_cursor, const int *clusterByteIndices, int numClusters) {
-    int idx = 0;
-    for (int i = 0; i < numClusters; i++) {
-        if (clusterByteIndices[i] <= byte_cursor)
-            idx = i;
-        else 
-            break;
+    // Handle empty text or invalid input
+    if (!text || !*text || numClusters == 0) {
+        debug_print(L"Empty text or no clusters, returning 0\n");
+        return 0;
     }
-    return idx;
+
+    debug_print(L"Finding cluster for byte_cursor: %d\n", byte_cursor);
+
+    // Find the exact cluster that contains the cursor
+    for (int i = 0; i < numClusters; i++) {
+        int nextOffset = (i + 1 < numClusters) ? 
+                        clusterByteIndices[i + 1] : strlen(text);
+        
+        if (byte_cursor >= clusterByteIndices[i] && byte_cursor < nextOffset) {
+            debug_print(L"Found cursor in cluster %d\n", i);
+            return i;
+        }
+    }
+
+    // If cursor is beyond text, return last cluster
+    return numClusters - 1;
 }
 
 int update_render_data(SDL_Renderer *renderer, TTF_Font *font,
-                       const char *utf8_text, int margin, RenderData *rd) {
-    if (!renderer || !font || !utf8_text || !rd)
-        return -1;
-
-    // Free previous resources
-    if (rd->textTexture) { SDL_DestroyTexture(rd->textTexture); rd->textTexture = NULL; }
-    if (rd->glyphRects) { free(rd->glyphRects); rd->glyphRects = NULL; }
-    if (rd->glyphOffsets) { free(rd->glyphOffsets); rd->glyphOffsets = NULL; }
-    if (rd->clusterRects) { free(rd->clusterRects); rd->clusterRects = NULL; }
-    if (rd->glyphByteOffsets) { free(rd->glyphByteOffsets); rd->glyphByteOffsets = NULL; }
-    if (rd->clusterByteIndices) { free(rd->clusterByteIndices); rd->clusterByteIndices = NULL; }
-
-    // Render text surface
-    SDL_Color textColor = {198, 194, 199, 255};
-    SDL_Surface *textSurface = TTF_RenderUTF8_Blended(font, utf8_text, textColor);
-    if (!textSurface) {
-        rd->numGlyphs = 0; rd->numClusters = 0; rd->textW = 0; rd->textRect.w = 0;
-        SDL_Surface *surf = SDL_CreateRGBSurface(0, 1, rd->textH, 32, 0,0,0,0);
-        rd->textTexture = SDL_CreateTextureFromSurface(renderer, surf);
-        SDL_FreeSurface(surf);
+                       const char *utf8_text, int margin, int maxWidth, RenderData *rd) {
+    static uint32_t last_update_time = 0;
+    static uint32_t update_count = 0;
+    update_count++;
+    uint32_t current_time = SDL_GetTicks();
+    
+    // Throttling and state tracking.
+    static uint32_t update_hash = 0;
+    uint32_t new_hash = 0;
+    for (const char *p = utf8_text; *p; p++) {
+        new_hash = ((new_hash << 5) + new_hash) + *p;
+    }
+    new_hash ^= maxWidth;
+    debug_print(L"[UPDATE %d] Computed hash: %u (prev: %u)\n", update_count, new_hash, update_hash);
+    
+    if (current_time - last_update_time < 16 && new_hash == update_hash) {
+        debug_print(L"[THROTTLE] Skipping redundant update (hash: %u)\n", new_hash);
         return 0;
     }
-    rd->textTexture = SDL_CreateTextureFromSurface(renderer, textSurface);
-    SDL_FreeSurface(textSurface);
-    if (!rd->textTexture) {
+    update_hash = new_hash;
+    last_update_time = current_time;
+
+    // Log text length and content.
+    size_t text_len = strlen(utf8_text);
+    debug_print(L"[UPDATE %d] Received text of length %u: \"%hs\"\n", update_count, (unsigned)text_len, utf8_text);
+    if (!utf8_text || !*utf8_text) {
+        debug_print(L"[UPDATE %d] Text is empty. Skipping layout.\n", update_count);
+        rd->numGlyphs = 0;
+        rd->numClusters = 0;
+        rd->textW = 0;
+        rd->textH = TTF_FontHeight(font);
+        rd->textRect.x = margin;
+        rd->textRect.y = margin;
+        rd->textRect.w = 0;
+        rd->textRect.h = rd->textH;
+        debug_print(L"[UPDATE %d] Skipping texture creation due to empty text.\n", update_count);
+        return 0;
+    }
+
+    // Create the text surface.
+    SDL_Color textColor = {198, 194, 199, 255};
+    SDL_Surface *textSurface = TTF_RenderUTF8_Blended_Wrapped(font, utf8_text, textColor, maxWidth);
+    if (!textSurface) {
+        debug_print(L"[ERROR] Failed to create text surface: %s\n", TTF_GetError());
         return -1;
     }
-    SDL_QueryTexture(rd->textTexture, NULL, NULL, &rd->textW, &rd->textH);
+    debug_print(L"[UPDATE %d] Surface created - W: %d, H: %d (Font height: %d)\n",
+                update_count, textSurface->w, textSurface->h, TTF_FontHeight(font));
+
+    // Right after confirming textSurface is valid but before creating texture:
+    rd->textW = textSurface->w;
+    rd->textH = textSurface->h;
     rd->textRect.x = margin;
     rd->textRect.y = margin;
-    rd->textRect.w = rd->textW;
-    rd->textRect.h = rd->textH;
+    rd->textRect.w = textSurface->w;
+    rd->textRect.h = textSurface->h;
+    debug_print(L"[UPDATE %d] Updated textRect to (%d, %d, %d, %d)\n",
+                update_count, rd->textRect.x, rd->textRect.y, 
+                rd->textRect.w, rd->textRect.h);
+
+    // (Optionally, log the raw surface data here.) 
+
+    // Debug: log that we are about to compute glyph metrics.
+    debug_print(L"[UPDATE %d] Starting layout computations...\n", update_count);
     
-    // Count and store glyph info.
-    rd->numGlyphs = 0;
-    const char *p = utf8_text;
-    while (*p) {
-        rd->numGlyphs++;
-        p += utf8_char_length(p);
-    }
-    rd->glyphRects = malloc(rd->numGlyphs * sizeof(SDL_Rect));
-    rd->glyphOffsets = malloc(rd->numGlyphs * sizeof(int));
-    rd->glyphByteOffsets = malloc(rd->numGlyphs * sizeof(int));
-    if (!rd->glyphRects || !rd->glyphOffsets || !rd->glyphByteOffsets)
-        return -1;
-    p = utf8_text;
-    int currX = 0;
-    int i = 0;
-    while (*p && i < rd->numGlyphs) {
-        rd->glyphByteOffsets[i] = p - utf8_text;
-        int len = utf8_char_length(p);
-        int charW = get_glyph_width(font, p, len);
-        rd->glyphOffsets[i] = currX;
-        rd->glyphRects[i].w = charW;
-        rd->glyphRects[i].h = rd->textRect.h;
-        currX += charW;
-        i++;
-        p += len;
-    }
-    rd->textW = currX;
-    rd->textRect.w = rd->textW;
-    for (i = 0; i < rd->numGlyphs; i++) {
-        rd->glyphRects[i].x = rd->textRect.x + rd->glyphOffsets[i];
-        rd->glyphRects[i].y = rd->textRect.y;
-    }
+    // ...existing code that computes glyph metrics and groups clusters...
+    // For debugging, simulate logging intermediate layout results:
+    // (In your actual layout code, log the computed rd->numGlyphs, rd->numClusters, and the resulting geometry)
+    debug_print(L"[UPDATE %d] Intermediate: computed glyph count = %d\n", update_count, rd->numGlyphs);
+    debug_print(L"[UPDATE %d] Intermediate: computed cluster count = %d\n", update_count, rd->numClusters);
     
-    // Group glyphs into clusters.
-    rd->clusterRects = malloc(rd->numGlyphs * sizeof(SDL_Rect));
-    rd->clusterByteIndices = malloc(rd->numGlyphs * sizeof(int));
-    if (!rd->clusterRects || !rd->clusterByteIndices)
-        return -1;
-    int numClusters = 0;
-    int combiningCount = 0;
-    // Allocate a temporary array to hold codepoints.
-    wchar_t *codePoints = malloc(rd->numGlyphs * sizeof(wchar_t));
-    if (!codePoints)
-        return -1;
-    p = utf8_text;
-    for (i = 0; i < rd->numGlyphs; i++) {
-        int len = utf8_char_length(p);
-        wchar_t wc;
-        mbtowc(&wc, p, len);
-        codePoints[i] = wc;
-        p += len;
+    // ...existing code...
+    
+    debug_print(L"[UPDATE %d] Final layout - TextW: %d, TextH: %d, NumGlyphs: %d, NumClusters: %d\n",
+                update_count, rd->textW, rd->textH, rd->numGlyphs, rd->numClusters);
+    
+    // Create texture from the surface.
+    SDL_Texture *texture = SDL_CreateTextureFromSurface(renderer, textSurface);
+    if (!texture) {
+         debug_print(L"[ERROR] Failed to create texture: %s\n", SDL_GetError());
+         SDL_FreeSurface(textSurface);
+         return -1;
     }
-    for (i = 0; i < rd->numGlyphs; i++) {
-        if (!(codePoints[i] >= 0x0300 && codePoints[i] <= 0x036F)) {
-            rd->clusterRects[numClusters] = rd->glyphRects[i];
-            rd->clusterByteIndices[numClusters] = rd->glyphByteOffsets[i];
-            numClusters++;
-            combiningCount = 0;
-        } else {
-            if (combiningCount < MAX_COMBINING_PER_CLUSTER && numClusters > 0) {
-                rd->clusterRects[numClusters-1].w += rd->glyphRects[i].w;
-                combiningCount++;
-            }
-        }
-    }
-    rd->numClusters = numClusters;
-    free(codePoints);
+    rd->textTexture = texture;
+    SDL_FreeSurface(textSurface);
+    
     return 0;
 }
