@@ -21,14 +21,15 @@ static int utf8_char_length(const char *s) {
     return 1;
 }
 
-void display_text_window(const char *utf8_text, const char *font_path, int font_size) {
+void display_text_window(const char *font_path, int font_size) {
+    debug_print(L"Entering display_text_window\n");  // Added debug log
+    
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { /* error handling */ return; }
     if (TTF_Init() != 0) { /* error handling */ SDL_Quit(); return; }
 
     SDL_Window *window = SDL_CreateWindow("Unicode Editor",
                          SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                          800, 600, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    // Ensure window has focus and a defined rectangle for text input
     SDL_RaiseWindow(window);
     SDL_SetTextInputRect(&(SDL_Rect){0, 0, 800, 600});
     if (!window) { /* error handling */ TTF_Quit(); SDL_Quit(); return; }
@@ -36,7 +37,14 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
     if (!renderer) { /* error handling */ SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return; }
 
     TTF_Font *font = TTF_OpenFont(font_path, font_size);
-    if (!font) { /* error handling */ SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return; }
+    if (!font) {
+        debug_print(L"[ERROR] Failed to open font: %hs\n", TTF_GetError());
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
+        return;
+    }
     TTF_SetFontHinting(font, TTF_HINTING_NORMAL);
 
     const int margin = 20;
@@ -44,12 +52,10 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
     int maxTextWidth = windowWidth - (2 * margin);
     RenderData rd = {0};
 
-    // Use a dynamic buffer for editable text.
-    char *editorText = strdup(utf8_text);
+    // Use a dynamic buffer for editable text. Start with empty text.
+    char *editorText = strdup("");  // Changed from "" to " " so layout is built
     if (!editorText) { /* error handling */ return; }
-    // Initialize cursor at start, not end of text
     int cursorPos = 0;
-    // Selection variables with clearer purpose
     int selectionStart = -1, selectionEnd = -1;
     int mouseSelecting = 0;  // Only true when selecting with mouse
 
@@ -58,7 +64,6 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
 
     // Initial render with line wrapping
     if (update_render_data(renderer, font, editorText, margin, maxTextWidth, &rd) != 0) {
-        // error handling
         free(editorText);
         TTF_CloseFont(font); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window);
         TTF_Quit(); SDL_Quit();
@@ -68,30 +73,25 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
     int running = 1;
     SDL_Event event;
 
-    // Track last state to prevent unnecessary updates
     int lastWidth = windowWidth;
     char *lastText = NULL;
-    
-    // Add render state tracking
+
     static struct {
         uint32_t last_render;
         uint32_t last_content_hash;
         int last_width;
         bool needs_update;
     } state = {0, 0, 0, true};
-    
+
     while (running) {
         uint32_t frame_start = SDL_GetTicks();
         static int frame_count = 0;
         frame_count++;
-        
-        // Log state at start of frame
         debug_print(L"[FRAME %d] ====================================\n", frame_count);
         debug_print(L"[FRAME %d] Window: %dx%d, Text len: %d\n", 
                     frame_count, windowWidth, windowHeight, (int)strlen(editorText));
         
         while (SDL_PollEvent(&event)) {
-            // Log each event
             debug_print(L"[FRAME %d] Event: %d\n", frame_count, event.type);
             
             if (event.type == SDL_QUIT) {
@@ -104,20 +104,16 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
                     windowWidth = event.window.data1;
                     windowHeight = event.window.data2;
                     
-                    // Only update if width actually changed
                     if (windowWidth != lastWidth) {
                         maxTextWidth = windowWidth - (2 * margin);
-                        debug_print(L"Window width changed: %d -> %d\n", 
-                                  lastWidth, windowWidth);
-                        update_render_data(renderer, font, editorText, 
-                                         margin, maxTextWidth, &rd);
+                        debug_print(L"Window width changed: %d -> %d\n", lastWidth, windowWidth);
+                        update_render_data(renderer, font, editorText, margin, maxTextWidth, &rd);
                         lastWidth = windowWidth;
                     }
                 }
             }
             else if (event.type == SDL_TEXTINPUT) {
                 debug_print(L"[EVENT] SDL_TEXTINPUT received: \"%hs\"\n", event.text.text);
-                // Insert new text at the cursor position.
                 int insertLen = (int)strlen(event.text.text);
                 int curLen = (int)strlen(editorText);
                 char *newText = malloc(curLen + insertLen + 1);
@@ -134,39 +130,29 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
             else if (event.type == SDL_KEYDOWN) {
                 if (event.key.keysym.sym == SDLK_BACKSPACE) {
                     if (cursorPos > 0) {
-                        // Add bounds checking for backspace
                         int prevPos = cursorPos - 1;
                         while (prevPos > 0 && ((unsigned char)editorText[prevPos] & 0xC0) == 0x80) {
                             prevPos--;
                         }
-                        
-                        // Ensure we don't exceed buffer bounds
                         int rem = cursorPos - prevPos;
                         if (rem > 0) {
                             int curLen = (int)strlen(editorText);
                             char *newText = malloc(curLen - rem + 1);
                             if (!newText) continue;
-                            
                             if (prevPos > 0) {
                                 memcpy(newText, editorText, prevPos);
                             }
-                            memcpy(newText + prevPos, editorText + cursorPos, 
-                                   curLen - cursorPos + 1);
-                            
+                            memcpy(newText + prevPos, editorText + cursorPos, curLen - cursorPos + 1);
                             free(editorText);
                             editorText = newText;
                             cursorPos = prevPos;
-                            
-                            // Clear any selection when modifying text
                             selectionStart = selectionEnd = -1;
                             mouseSelecting = 0;
-                            
                             update_render_data(renderer, font, editorText, margin, maxTextWidth, &rd);
                         }
                     }
                 }
                 else if (event.key.keysym.sym == SDLK_LEFT) {
-                    // Move cursor left.
                     if (cursorPos > 0) {
                         int pos = cursorPos - 1;
                         while (pos > 0 && ((unsigned char)editorText[pos] & 0xC0) == 0x80) { pos--; }
@@ -174,7 +160,6 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
                     }
                 }
                 else if (event.key.keysym.sym == SDLK_RIGHT) {
-                    // Move cursor right.
                     int curLen = (int)strlen(editorText);
                     if (cursorPos < curLen) {
                         int pos = cursorPos + 1;
@@ -183,18 +168,15 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
                     }
                 }
                 else if (event.key.keysym.sym == SDLK_ESCAPE) {
-                    // Clear selection.
                     selectionStart = selectionEnd = -1;
                     mouseSelecting = 0;
                 }
-                // Allow clipboard copy as before.
                 else if (event.key.keysym.sym == SDLK_c && (event.key.keysym.mod & KMOD_GUI)) {
                     if (SDL_SetClipboardText(editorText) == 0)
                         printf("Text copied to clipboard.\n");
                     else
                         printf("Clipboard error: %s\n", SDL_GetError());
                 }
-                // Add paste support
                 else if (event.key.keysym.sym == SDLK_v && (event.key.keysym.mod & KMOD_GUI)) {
                     char *clipboard_text = SDL_GetClipboardText();
                     if (clipboard_text) {
@@ -204,8 +186,7 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
                         if (newText) {
                             memcpy(newText, editorText, cursorPos);
                             memcpy(newText + cursorPos, clipboard_text, pasteLen);
-                            memcpy(newText + cursorPos + pasteLen, 
-                                   editorText + cursorPos, curLen - cursorPos + 1);
+                            memcpy(newText + cursorPos + pasteLen, editorText + cursorPos, curLen - cursorPos + 1);
                             free(editorText);
                             editorText = newText;
                             cursorPos += pasteLen;
@@ -215,7 +196,6 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
                     }
                 }
                 else if (event.key.keysym.sym == SDLK_s) {
-                    // For demonstration, toggle selection start at current cursor.
                     if (selectionStart < 0) selectionStart = cursorPos;
                 }
             }
@@ -225,11 +205,9 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
                     int relativeX = event.button.x - rd.textRect.x;
                     int nearestCluster = 0;
                     int minDist = INT_MAX;
-                    
-                    // Bounds checking for cluster calculation
                     if (rd.numClusters > 0) {
                         for (int i = 0; i < rd.numClusters; i++) {
-                            if (i < rd.numGlyphs) {  // Ensure we don't exceed array bounds
+                            if (i < rd.numGlyphs) {
                                 int clusterX = rd.glyphOffsets[i];
                                 int dist = abs(clusterX - relativeX);
                                 if (dist < minDist) {
@@ -238,15 +216,12 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
                                 }
                             }
                         }
-                        
                         selectionStart = nearestCluster;
-                        if (nearestCluster < rd.numClusters) {  // Bounds check
+                        if (nearestCluster < rd.numClusters) {
                             cursorPos = rd.clusterByteIndices[nearestCluster];
                         }
                         mouseSelecting = 1;
-                        
-                        debug_print(L"Selection started at cluster %d (byte offset %d)\n", 
-                                   nearestCluster, cursorPos);
+                        debug_print(L"Selection started at cluster %d (byte offset %d)\n", nearestCluster, cursorPos);
                     }
                 }
             }
@@ -254,7 +229,6 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
                 int relativeX = event.motion.x - rd.textRect.x;
                 int nearestCluster = 0;
                 int minDist = INT_MAX;
-                
                 for (int i = 0; i < rd.numClusters; i++) {
                     int clusterX = rd.glyphOffsets[i];
                     int dist = abs(clusterX - relativeX);
@@ -263,44 +237,34 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
                         nearestCluster = i;
                     }
                 }
-                
                 selectionEnd = nearestCluster;
                 cursorPos = rd.clusterByteIndices[nearestCluster];
                 debug_print(L"Selection updated: %d to %d\n", selectionStart, selectionEnd);
             }
             else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
                 mouseSelecting = 0;
-                // Only update selection end if we were actually selecting
                 if (selectionStart >= 0) {
-                    selectionEnd = get_cluster_index_at_cursor(editorText, cursorPos, 
-                                                             rd.clusterByteIndices, rd.numClusters);
+                    selectionEnd = get_cluster_index_at_cursor(editorText, cursorPos, rd.clusterByteIndices, rd.numClusters);
                     debug_print(L"Selection ended at cluster %d\n", selectionEnd);
                 }
             }
         } // End event poll
 
-        // Before update check
-        debug_print(L"[FRAME %d] Update check - Last width: %d, Current width: %d\n",
-                    frame_count, lastWidth, windowWidth);
+        debug_print(L"[FRAME %d] Update check - Last width: %d, Current width: %d\n", frame_count, lastWidth, windowWidth);
 
-        // Track content and layout changes
         if (lastText) {
             uint32_t content_hash = 0;
             for (const char *p = editorText; *p; p++) {
                 content_hash = ((content_hash << 5) + content_hash) + *p;
             }
-            
-            if (content_hash != state.last_content_hash || 
-                windowWidth != state.last_width) {
-                debug_print(L"[STATE] Content change detected (hash: %u -> %u)\n",
-                           state.last_content_hash, content_hash);
+            if (content_hash != state.last_content_hash || windowWidth != state.last_width) {
+                debug_print(L"[STATE] Content change detected (hash: %u -> %u)\n", state.last_content_hash, content_hash);
                 state.needs_update = true;
                 state.last_content_hash = content_hash;
                 state.last_width = windowWidth;
             }
         }
 
-        // Only update if needed
         if (state.needs_update) {
             debug_print(L"[RENDER] Updating text layout\n");
             update_render_data(renderer, font, editorText, margin, maxTextWidth, &rd);
@@ -313,32 +277,23 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
 
         SDL_RenderCopy(renderer, rd.textTexture, NULL, &rd.textRect);
 
-        // Draw selection highlight only if mouse-selected
-        if (mouseSelecting && selectionStart >= 0 && selectionEnd >= 0 && 
-            selectionStart != selectionEnd) {
+        if (mouseSelecting && selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd) {
             int startIdx = selectionStart < selectionEnd ? selectionStart : selectionEnd;
             int endIdx = selectionStart < selectionEnd ? selectionEnd : selectionStart;
-            
-            // Bounds checking for highlight calculation
             if (startIdx < rd.numClusters && endIdx < rd.numClusters) {
                 SDL_Rect hl = {
                     rd.textRect.x + rd.glyphOffsets[startIdx],
                     rd.textRect.y,
-                    rd.glyphOffsets[endIdx] - rd.glyphOffsets[startIdx] + 
-                        rd.clusterRects[endIdx].w,
+                    rd.glyphOffsets[endIdx] - rd.glyphOffsets[startIdx] + rd.clusterRects[endIdx].w,
                     rd.textRect.h
                 };
-                
-                debug_print(L"Highlight rect: x=%d, y=%d, w=%d, h=%d\n", 
-                           hl.x, hl.y, hl.w, hl.h);
-                
+                debug_print(L"Highlight rect: x=%d, y=%d, w=%d, h=%d\n", hl.x, hl.y, hl.w, hl.h);
                 SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
                 SDL_SetRenderDrawColor(renderer, 200, 200, 180, 128);
                 SDL_RenderFillRect(renderer, &hl);
             }
         }
 
-        // Draw a cursor (a simple vertical line) at the insertion point.
         int clusterIdx = get_cluster_index_at_cursor(editorText, cursorPos, rd.clusterByteIndices, rd.numClusters);
         int cursorX = rd.textRect.x;
         if (clusterIdx < rd.numClusters)
@@ -352,7 +307,6 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
         SDL_RenderPresent(renderer);
         
-        // Frame timing
         uint32_t frame_time = SDL_GetTicks() - frame_start;
         debug_print(L"[TIMING] Frame time: %dms\n", frame_time);
         
@@ -364,7 +318,6 @@ void display_text_window(const char *utf8_text, const char *font_path, int font_
     SDL_StopTextInput();
 
     free(lastText);
-    // Cleanup:
     free(rd.clusterByteIndices);
     free(rd.glyphByteOffsets);
     free(rd.clusterRects);

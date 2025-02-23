@@ -9,10 +9,8 @@
 int main(void) {
     setlocale(LC_ALL, "");
 
-    // Use a test string instead of an empty string for initial text.
-    const char *initial_text = "";         // Revert to empty
-
-    display_text_window(initial_text, "/Users/george/code/robustext-concept/Inter.ttf", 24);
+    // Removed initial text functionality:
+    display_text_window("./Inter.ttf", 24);
 
     return 0;
 }
