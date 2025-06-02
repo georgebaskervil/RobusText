@@ -20,14 +20,18 @@ format:
 
 check-format:
 	@echo "Checking code formatting..."
-	@./format.sh > /dev/null
-	@if git diff --quiet; then \
-		echo "✓ Code is properly formatted"; \
-	else \
-		echo "✗ Code formatting issues found. Run 'make format' to fix."; \
-		git diff --name-only; \
-		exit 1; \
-	fi
+	@temp_dir=$$(mktemp -d); \
+	find . -name "*.c" -o -name "*.h" | while read -r file; do \
+		cp "$$file" "$$temp_dir/"; \
+		clang-format -style=file "$$file" > "$$temp_dir/$$(basename $$file).formatted"; \
+		if ! diff -q "$$file" "$$temp_dir/$$(basename $$file).formatted" > /dev/null; then \
+			echo "✗ $$file needs formatting"; \
+			rm -rf "$$temp_dir"; \
+			exit 1; \
+		fi; \
+	done; \
+	rm -rf "$$temp_dir"; \
+	echo "✓ All files are properly formatted"
 
 install-hooks:
 	@echo "Installing pre-commit hooks..."
