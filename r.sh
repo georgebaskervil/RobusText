@@ -1,4 +1,3 @@
-rm main
-clear
+make clean
 make
 ./main

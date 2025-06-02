@@ -43,9 +43,14 @@ int get_glyph_index_at_cursor(const char *text, int byte_cursor) {
 
 int get_cluster_index_at_cursor(const char *text, int byte_cursor, const int *clusterByteIndices, int numClusters) {
     // Handle empty text or invalid input
-    if (!text || !*text || numClusters == 0) {
+    if (!text || numClusters == 0) {
         debug_print(L"Empty text or no clusters, returning 0\n");
         return 0;
+    }
+    // If cursor is at the very end of the text
+    if (byte_cursor > 0 && (size_t)byte_cursor == strlen(text)) {
+         debug_print(L"Cursor at end of text, returning numClusters\n");
+         return numClusters; // Indicate position after the last cluster
     }
 
     debug_print(L"Finding cluster for byte_cursor: %d\n", byte_cursor);
@@ -61,12 +66,21 @@ int get_cluster_index_at_cursor(const char *text, int byte_cursor, const int *cl
         }
     }
 
-    // If cursor is beyond text, return last cluster
+    // Fallback if byte_cursor is 0 (start of text) and not caught by loop (e.g. empty string was handled)
+    if (byte_cursor == 0) {
+        debug_print(L"Cursor at beginning of text (byte_cursor 0)\n");
+        return 0;
+    }
+    
+    // This case should ideally not be reached if logic above is complete.
+    // It implies cursor is beyond text but not caught by the specific end-of-text check,
+    // or some other unhandled scenario. Defaulting to last cluster or numClusters might be context-dependent.
+    debug_print(L"Cursor position %d not resolved cleanly, returning numClusters -1 (last cluster)\n", byte_cursor);
     return numClusters - 1;
 }
 
 int update_render_data(SDL_Renderer *renderer, TTF_Font *font,
-                       const char *utf8_text, int margin, int maxWidth, RenderData *rd) {
+                       const char *utf8_text, int x_offset, int y_offset, int maxWidth, RenderData *rd) {
     static uint32_t last_update_time = 0;
     static uint32_t update_count = 0;
     update_count++;
@@ -97,8 +111,8 @@ int update_render_data(SDL_Renderer *renderer, TTF_Font *font,
         rd->numClusters = 0;
         rd->textW = 0;
         rd->textH = TTF_FontHeight(font);
-        rd->textRect.x = margin;
-        rd->textRect.y = margin;
+        rd->textRect.x = x_offset;
+        rd->textRect.y = y_offset;
         rd->textRect.w = 0;
         rd->textRect.h = rd->textH;
         debug_print(L"[UPDATE %d] Skipping texture creation due to empty text.\n", update_count);
@@ -112,14 +126,18 @@ int update_render_data(SDL_Renderer *renderer, TTF_Font *font,
         debug_print(L"[ERROR] Failed to create text surface: %s\n", TTF_GetError());
         return -1;
     }
+
+    // Right after surface creation, update maxLineWidth for wrapping logic
+    rd->maxLineWidth = maxWidth;
+
     debug_print(L"[UPDATE %d] Surface created - W: %d, H: %d (Font height: %d)\n",
                 update_count, textSurface->w, textSurface->h, TTF_FontHeight(font));
 
     // Right after confirming textSurface is valid but before creating texture:
     rd->textW = textSurface->w;
     rd->textH = textSurface->h;
-    rd->textRect.x = margin;
-    rd->textRect.y = margin;
+    rd->textRect.x = x_offset;
+    rd->textRect.y = y_offset;
     rd->textRect.w = textSurface->w;
     rd->textRect.h = textSurface->h;
     debug_print(L"[UPDATE %d] Updated textRect to (%d, %d, %d, %d)\n",
@@ -131,9 +149,76 @@ int update_render_data(SDL_Renderer *renderer, TTF_Font *font,
     // Debug: log that we are about to compute glyph metrics.
     debug_print(L"[UPDATE %d] Starting layout computations...\n", update_count);
     
-    // ...existing code that computes glyph metrics and groups clusters...
-    // For debugging, simulate logging intermediate layout results:
-    // (In your actual layout code, log the computed rd->numGlyphs, rd->numClusters, and the resulting geometry)
+    // Compute glyph and cluster layout
+    int utf8_len = strlen(utf8_text);
+    
+    // Count UTF-8 characters first
+    int char_count = 0;
+    int pos = 0;
+    while (pos < utf8_len) {
+        int char_len = utf8_char_length(utf8_text + pos);
+        pos += char_len;
+        char_count++;
+    }
+    
+    // Allocate arrays for glyph and cluster data
+    rd->numGlyphs = char_count;
+    rd->numClusters = char_count; // For simplicity, each character is its own cluster
+    
+    // Free old allocations if they exist
+    if (rd->textTexture) {
+        SDL_DestroyTexture(rd->textTexture);
+        rd->textTexture = NULL;
+    }
+    if (rd->glyphOffsets) free(rd->glyphOffsets);
+    if (rd->clusterByteIndices) free(rd->clusterByteIndices);
+    if (rd->glyphRects) free(rd->glyphRects);
+    if (rd->clusterRects) free(rd->clusterRects);
+    
+    rd->glyphOffsets = malloc(char_count * sizeof(int));
+    rd->clusterByteIndices = malloc(char_count * sizeof(int));
+    rd->glyphRects = malloc(char_count * sizeof(SDL_Rect));
+    rd->clusterRects = malloc(char_count * sizeof(SDL_Rect));
+    
+    if (!rd->glyphOffsets || !rd->clusterByteIndices || !rd->glyphRects || !rd->clusterRects) {
+        debug_print(L"[ERROR] Failed to allocate glyph/cluster arrays\n");
+        return -1;
+    }
+    
+    // Compute positions for each character
+    pos = 0;
+    int current_x = 0;
+    int font_height = TTF_FontHeight(font);
+    
+    for (int i = 0; i < char_count; i++) {
+        int char_len = utf8_char_length(utf8_text + pos);
+        
+        // Store byte index for this cluster
+        rd->clusterByteIndices[i] = pos;
+        
+        // Store x offset for this glyph
+        rd->glyphOffsets[i] = current_x;
+        
+        // Get character width
+        char temp_char[5] = {0};
+        memcpy(temp_char, utf8_text + pos, char_len);
+        
+        int char_width, char_height;
+        if (TTF_SizeUTF8(font, temp_char, &char_width, &char_height) == 0) {
+            // Create glyph and cluster rectangles
+            rd->glyphRects[i] = (SDL_Rect){current_x, 0, char_width, font_height};
+            rd->clusterRects[i] = (SDL_Rect){current_x, 0, char_width, font_height};
+            current_x += char_width;
+        } else {
+            // Fallback for problematic characters
+            rd->glyphRects[i] = (SDL_Rect){current_x, 0, 10, font_height};
+            rd->clusterRects[i] = (SDL_Rect){current_x, 0, 10, font_height};
+            current_x += 10;
+        }
+        
+        pos += char_len;
+    }
+    
     debug_print(L"[UPDATE %d] Intermediate: computed glyph count = %d\n", update_count, rd->numGlyphs);
     debug_print(L"[UPDATE %d] Intermediate: computed cluster count = %d\n", update_count, rd->numClusters);
     
@@ -149,8 +234,46 @@ int update_render_data(SDL_Renderer *renderer, TTF_Font *font,
          SDL_FreeSurface(textSurface);
          return -1;
     }
+    
+    // Verify texture dimensions are reasonable
+    int tex_w, tex_h;
+    if (SDL_QueryTexture(texture, NULL, NULL, &tex_w, &tex_h) == 0) {
+        if (tex_w <= 0 || tex_h <= 0) {
+            debug_print(L"[ERROR] Invalid texture dimensions: %d x %d\n", tex_w, tex_h);
+            SDL_DestroyTexture(texture);
+            SDL_FreeSurface(textSurface);
+            return -1;
+        }
+        debug_print(L"[UPDATE %d] Created texture: %d x %d\n", update_count, tex_w, tex_h);
+    }
+    
     rd->textTexture = texture;
     SDL_FreeSurface(textSurface);
     
     return 0;
+}
+
+void cleanup_render_data(RenderData *rd) {
+    if (rd->textTexture) {
+        SDL_DestroyTexture(rd->textTexture);
+        rd->textTexture = NULL;
+    }
+    if (rd->glyphOffsets) {
+        free(rd->glyphOffsets);
+        rd->glyphOffsets = NULL;
+    }
+    if (rd->clusterByteIndices) {
+        free(rd->clusterByteIndices);
+        rd->clusterByteIndices = NULL;
+    }
+    if (rd->glyphRects) {
+        free(rd->glyphRects);
+        rd->glyphRects = NULL;
+    }
+    if (rd->clusterRects) {
+        free(rd->clusterRects);
+        rd->clusterRects = NULL;
+    }
+    rd->numGlyphs = 0;
+    rd->numClusters = 0;
 }

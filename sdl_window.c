@@ -2,78 +2,227 @@
 #include "sdl_window.h"
 #include "text_renderer.h"
 #include "debug.h"
+#include "file_operations.h"
+#include "undo_system.h"
+#include "search_system.h"
+#include "status_bar.h"
+#include "line_numbers.h"
+#include "auto_save.h"
+#include "dialog.h"
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>  // Add this for INT_MAX
+#include <ctype.h>
 
 #define MAX_COMBINING_PER_CLUSTER 5  // limit combining marks per cluster
 
-// Helper: determine the byte length of next UTF-8 character.
-static int utf8_char_length(const char *s) {
-    unsigned char c = (unsigned char)s[0];
-    if (c < 0x80) return 1;
-    else if ((c >> 5) == 0x6) return 2;
-    else if ((c >> 4) == 0xE) return 3;
-    else if ((c >> 3) == 0x1E) return 4;
-    return 1;
+// Move cursor to previous word
+static int move_cursor_word_left(const char *text, int cursor_pos) {
+    if (cursor_pos <= 0) return 0;
+    
+    int pos = cursor_pos - 1;
+    
+    // Skip whitespace
+    while (pos > 0 && isspace(text[pos])) {
+        pos--;
+    }
+    
+    // Skip non-whitespace
+    while (pos > 0 && !isspace(text[pos])) {
+        pos--;
+    }
+    
+    // If we stopped on whitespace, move forward one
+    if (pos > 0 && isspace(text[pos])) {
+        pos++;
+    }
+    
+    return pos;
+}
+
+// Move cursor to next word
+static int move_cursor_word_right(const char *text, int cursor_pos) {
+    int text_len = strlen(text);
+    if (cursor_pos >= text_len) return text_len;
+    
+    int pos = cursor_pos;
+    
+    // Skip non-whitespace
+    while (pos < text_len && !isspace(text[pos])) {
+        pos++;
+    }
+    
+    // Skip whitespace
+    while (pos < text_len && isspace(text[pos])) {
+        pos++;
+    }
+    
+    return pos;
+}
+
+// Move cursor to beginning of line
+static int move_cursor_line_start(const char *text, int cursor_pos) {
+    int pos = cursor_pos;
+    while (pos > 0 && text[pos - 1] != '\n') {
+        pos--;
+    }
+    return pos;
+}
+
+// Move cursor to end of line
+static int move_cursor_line_end(const char *text, int cursor_pos) {
+    int text_len = strlen(text);
+    int pos = cursor_pos;
+    while (pos < text_len && text[pos] != '\n') {
+        pos++;
+    }
+    return pos;
+}
+
+// Delete selected text and return new cursor position
+static int delete_selection(char **text, int selection_start, int selection_end, 
+                           const int *cluster_byte_indices, int num_clusters) {
+    if (selection_start < 0 || selection_end < 0 || selection_start == selection_end) {
+        return -1; // No selection
+    }
+    
+    int start_idx = selection_start < selection_end ? selection_start : selection_end;
+    int end_idx = selection_start < selection_end ? selection_end : selection_start;
+    
+    if (start_idx >= num_clusters || end_idx >= num_clusters) {
+        return -1;
+    }
+    
+    int start_byte = cluster_byte_indices[start_idx];
+    int end_byte = (end_idx + 1 < num_clusters) ? cluster_byte_indices[end_idx + 1] : strlen(*text);
+    
+    int text_len = strlen(*text);
+    char *new_text = malloc(text_len - (end_byte - start_byte) + 1);
+    if (!new_text) return -1;
+    
+    memcpy(new_text, *text, start_byte);
+    memcpy(new_text + start_byte, *text + end_byte, text_len - end_byte + 1);
+    
+    free(*text);
+    *text = new_text;
+    
+    return start_byte;
+}
+
+// Simple file picker (basic implementation)
+static char* simple_file_picker(bool is_save) {
+    // Use the new dialog system for consistency
+    return get_file_dialog(is_save);
 }
 
 void display_text_window(const char *font_path, int font_size) {
-    debug_print(L"Entering display_text_window\n");  // Added debug log
+    debug_print(L"Entering display_text_window\n");
     
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { /* error handling */ return; }
+    
+    // Enable macOS-like text rendering with stem darkening
+    setenv("FREETYPE_PROPERTIES", "autofitter:no-stem-darkening=0 cff:no-stem-darkening=0", 1);
+    
     if (TTF_Init() != 0) { /* error handling */ SDL_Quit(); return; }
 
-    SDL_Window *window = SDL_CreateWindow("Unicode Editor",
+    SDL_Window *window = SDL_CreateWindow("RobusText Editor",
                          SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                         800, 600, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+                         900, 700, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     SDL_RaiseWindow(window);
-    SDL_SetTextInputRect(&(SDL_Rect){0, 0, 800, 600});
+    SDL_SetTextInputRect(&(SDL_Rect){0, 0, 900, 700});
     if (!window) { /* error handling */ TTF_Quit(); SDL_Quit(); return; }
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer) { /* error handling */ SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return; }
+    // Set logical rendering size to window dimensions to handle high-DPI scaling
+    SDL_RenderSetLogicalSize(renderer, 900, 700);
 
     TTF_Font *font = TTF_OpenFont(font_path, font_size);
-    if (!font) {
+    TTF_Font *status_font = TTF_OpenFont(font_path, font_size - 4); // Smaller font for status
+    if (!font || !status_font) {
         debug_print(L"[ERROR] Failed to open font: %hs\n", TTF_GetError());
+        if (font) TTF_CloseFont(font);
+        if (status_font) TTF_CloseFont(status_font);
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
         TTF_Quit();
         SDL_Quit();
         return;
     }
-    TTF_SetFontHinting(font, TTF_HINTING_NORMAL);
+    // Apply macOS-like text rendering: disable hinting for natural glyph shapes
+    TTF_SetFontHinting(font, TTF_HINTING_NONE);
+    TTF_SetFontHinting(status_font, TTF_HINTING_NONE);
+
+    // Initialize dialog context for GUI dialogs
+    set_dialog_context(renderer, font, window);
 
     const int margin = 20;
-    int windowWidth = 800, windowHeight = 600;
-    int maxTextWidth = windowWidth - (2 * margin);
+    int windowWidth = 900, windowHeight = 700;
+    
+    // Initialize all systems first to get line numbers width
+    DocumentState document;
+    init_document_state(&document);
+    
+    UndoSystem undo;
+    init_undo_system(&undo, 100); // Keep 100 undo actions
+    
+    SearchState search;
+    init_search_state(&search);
+    
+    StatusBar status_bar;
+    init_status_bar(&status_bar, renderer, status_font, windowWidth, windowHeight);
+    
+    LineNumbers line_numbers;
+    init_line_numbers(&line_numbers, renderer, font, windowHeight);
+    
+    AutoSave auto_save;
+    init_auto_save(&auto_save, 30000);  // Auto-save every 30 seconds
+    
+    // Calculate text area dimensions accounting for line numbers
+    int line_numbers_width = get_line_numbers_width(&line_numbers);
+    int maxTextWidth = windowWidth - (2 * margin) - line_numbers_width;
+    int text_area_height = windowHeight - status_bar.height;
+    int text_area_x = line_numbers_width + margin;  // Start text after line numbers
+    int text_area_y = margin; // Added to align text with line numbers
+    
     RenderData rd = {0};
-
+    
     // Use a dynamic buffer for editable text. Start with empty text.
-    char *editorText = strdup("");  // Changed from "" to " " so layout is built
+    char *editorText = strdup("");
     if (!editorText) { /* error handling */ return; }
     int cursorPos = 0;
     int selectionStart = -1, selectionEnd = -1;
-    int mouseSelecting = 0;  // Only true when selecting with mouse
+    int mouseSelecting = 0;
+    bool search_mode = false;
+    char search_buffer[256] = {0};
+    int search_buffer_pos = 0;
 
     // Start SDL text input.
     SDL_StartTextInput();
 
     // Initial render with line wrapping
-    if (update_render_data(renderer, font, editorText, margin, maxTextWidth, &rd) != 0) {
+    if (update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd) != 0) {
         free(editorText);
-        TTF_CloseFont(font); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window);
-        TTF_Quit(); SDL_Quit();
+        cleanup_document_state(&document);
+        cleanup_undo_system(&undo);
+        cleanup_search_state(&search);
+        cleanup_status_bar(&status_bar);
+        cleanup_line_numbers(&line_numbers);
+        TTF_CloseFont(font);
+        TTF_CloseFont(status_font);
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        TTF_Quit();
+        SDL_Quit();
         return;
     }
 
     int running = 1;
     SDL_Event event;
-
     int lastWidth = windowWidth;
+    int lastHeight = windowHeight; // ADDED: To track last processed window height
     char *lastText = NULL;
 
     static struct {
@@ -83,37 +232,71 @@ void display_text_window(const char *font_path, int font_size) {
         bool needs_update;
     } state = {0, 0, 0, true};
 
+    // Update window title
+    char window_title[512];
+    snprintf(window_title, sizeof(window_title), "%s - RobusText Editor", 
+             document.filename ? document.filename : "Untitled");
+    SDL_SetWindowTitle(window, window_title);
+
     while (running) {
         uint32_t frame_start = SDL_GetTicks();
-        static int frame_count = 0;
-        frame_count++;
-        debug_print(L"[FRAME %d] ====================================\n", frame_count);
-        debug_print(L"[FRAME %d] Window: %dx%d, Text len: %d\n", 
-                    frame_count, windowWidth, windowHeight, (int)strlen(editorText));
         
         while (SDL_PollEvent(&event)) {
-            debug_print(L"[FRAME %d] Event: %d\n", frame_count, event.type);
-            
             if (event.type == SDL_QUIT) {
+                if (document.is_modified) {
+                    // In a real app, you'd show a dialog asking to save
+                    debug_print(L"Warning: Closing with unsaved changes\n");
+                }
                 running = 0;
             }
             else if (event.type == SDL_WINDOWEVENT) {
                 if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
                     event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                     
-                    windowWidth = event.window.data1;
-                    windowHeight = event.window.data2;
-                    
-                    if (windowWidth != lastWidth) {
-                        maxTextWidth = windowWidth - (2 * margin);
-                        debug_print(L"Window width changed: %d -> %d\n", lastWidth, windowWidth);
-                        update_render_data(renderer, font, editorText, margin, maxTextWidth, &rd);
-                        lastWidth = windowWidth;
+                    int new_event_width = event.window.data1;
+                    int new_event_height = event.window.data2;
+
+                    // Check if dimensions actually changed compared to the last processed state
+                    if (new_event_width != lastWidth || new_event_height != lastHeight) {
+                        windowWidth = new_event_width;
+                        windowHeight = new_event_height;
+                        
+                        // Update SDL Text Input Rect for the new window size
+                        SDL_SetTextInputRect(&(SDL_Rect){0, 0, windowWidth, windowHeight});
+
+                        text_area_height = windowHeight - status_bar.height;
+                        
+                        int line_numbers_width = get_line_numbers_width(&line_numbers);
+                        maxTextWidth = windowWidth - (2 * margin) - line_numbers_width;
+                        text_area_x = line_numbers_width + margin;
+                        text_area_y = margin; // Added to align text with line numbers
+                        
+                        resize_line_numbers(&line_numbers, windowHeight);
+                        status_bar.rect.y = windowHeight - status_bar.height;
+                        
+                        SDL_RenderSetLogicalSize(renderer, windowWidth, windowHeight);
+                        update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
+                        
+                        lastWidth = windowWidth;   // Update last known width
+                        lastHeight = windowHeight; // Update last known height
+                        
+                        status_bar.needs_update = true; // Moved inside: update status bar if dimensions changed
                     }
                 }
             }
-            else if (event.type == SDL_TEXTINPUT) {
-                debug_print(L"[EVENT] SDL_TEXTINPUT received: \"%hs\"\n", event.text.text);
+            else if (event.type == SDL_TEXTINPUT && !search_mode) {
+                // Record undo action before modification
+                record_insert_action(&undo, cursorPos, event.text.text, cursorPos, cursorPos + strlen(event.text.text));
+                
+                // Delete selection if any
+                if (selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd) {
+                    int new_cursor = delete_selection(&editorText, selectionStart, selectionEnd, rd.clusterByteIndices, rd.numClusters);
+                    if (new_cursor >= 0) {
+                        cursorPos = new_cursor;
+                        selectionStart = selectionEnd = -1;
+                    }
+                }
+                
                 int insertLen = (int)strlen(event.text.text);
                 int curLen = (int)strlen(editorText);
                 char *newText = malloc(curLen + insertLen + 1);
@@ -124,18 +307,407 @@ void display_text_window(const char *font_path, int font_size) {
                 free(editorText);
                 editorText = newText;
                 cursorPos += insertLen;
-                debug_print(L"[EVENT] Updated editorText: \"%hs\"\n", editorText);
-                update_render_data(renderer, font, editorText, margin, maxTextWidth, &rd);
+                
+                mark_document_modified(&document, true);
+                update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
+                status_bar.needs_update = true;
+            }
+            else if (event.type == SDL_TEXTINPUT && search_mode) {
+                // Handle search input (in replace mode, this is still the search term)
+                int input_len = strlen(event.text.text);
+                if (search_buffer_pos + input_len < (int)(sizeof(search_buffer) - 1)) {
+                    memcpy(search_buffer + search_buffer_pos, event.text.text, input_len);
+                    search_buffer_pos += input_len;
+                    search_buffer[search_buffer_pos] = '\0';
+                    
+                    // Set search term and perform search
+                    perform_search(&search, editorText, search_buffer);
+                    if (search.replace_mode) {
+                        // For now, use the search term as replace term too (will be enhanced later)
+                        set_replace_term(&search, search_buffer);
+                    }
+                    if (has_matches(&search)) {
+                        cursorPos = get_current_match_position(&search);
+                        selectionStart = search.current_match;
+                        selectionEnd = search.current_match;
+                    }
+                    status_bar.needs_update = true;
+                }
             }
             else if (event.type == SDL_KEYDOWN) {
-                if (event.key.keysym.sym == SDLK_BACKSPACE) {
-                    if (cursorPos > 0) {
+                SDL_Keymod mod = event.key.keysym.mod;
+                SDL_Keycode key = event.key.keysym.sym;
+                
+                if (search_mode) {
+                    if (key == SDLK_ESCAPE) {
+                        search_mode = false;
+                        clear_search(&search);
+                        selectionStart = selectionEnd = -1;
+                        status_bar.needs_update = true;
+                    }
+                    else if (key == SDLK_RETURN) {
+                        if (search.replace_mode && has_matches(&search)) {
+                            // In replace mode, Enter performs replace on current match
+                            if (search.replace_term) {
+                                char *new_text = replace_current_match(&search, editorText);
+                                if (new_text) {
+                                    record_delete_action(&undo, get_current_match_position(&search), 
+                                                      editorText + get_current_match_position(&search), 
+                                                      cursorPos, cursorPos);
+                                    free(editorText);
+                                    editorText = new_text;
+                                    mark_document_modified(&document, true);
+                                    // Re-search to update positions
+                                    perform_search(&search, editorText, search_buffer);
+                                    update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
+                                }
+                            }
+                        } else if (has_matches(&search)) {
+                            // Regular search mode, Enter finds next
+                            find_next(&search);
+                            cursorPos = get_current_match_position(&search);
+                            selectionStart = search.current_match;
+                            selectionEnd = search.current_match;
+                        }
+                        status_bar.needs_update = true;
+                    }
+                    else if (key == SDLK_BACKSPACE && search_buffer_pos > 0) {
+                        search_buffer_pos--;
+                        search_buffer[search_buffer_pos] = '\0';
+                        perform_search(&search, editorText, search_buffer);
+                        status_bar.needs_update = true;
+                    }
+                    continue; // Skip other key handling in search mode
+                }
+                
+                // File operations
+                if (key == SDLK_n && (mod & KMOD_GUI)) {
+                    // New file
+                    bool proceed = true;
+                    if (document.is_modified) {
+                        DialogResult result = show_save_confirmation_dialog(document.filename);
+                        if (result == DIALOG_YES) {
+                            // Save first
+                            if (document.filename) {
+                                if (!save_file(document.filename, editorText)) {
+                                    show_error_dialog("Save Error", "Failed to save file");
+                                    proceed = false;
+                                }
+                            } else {
+                                // Use Save As dialog for new files
+                                char *save_as_filename = get_file_dialog(true);
+                                if (save_as_filename) {
+                                    if (save_file(save_as_filename, editorText)) {
+                                        set_document_filename(&document, save_as_filename);
+                                        mark_document_modified(&document, false);
+                                    } else {
+                                        show_error_dialog("Save Error", "Failed to save file");
+                                        proceed = false;
+                                    }
+                                    free(save_as_filename);
+                                } else {
+                                    proceed = false;
+                                }
+                            }
+                        } else if (result == DIALOG_CANCEL) {
+                            proceed = false;
+                        }
+                        // DIALOG_NO means proceed without saving
+                    }
+                    
+                    if (proceed) {
+                        free(editorText);
+                        editorText = strdup("");
+                        cursorPos = 0;
+                        selectionStart = selectionEnd = -1;
+                        cleanup_document_state(&document);
+                        init_document_state(&document);
+                        cleanup_undo_system(&undo);
+                        init_undo_system(&undo, 100);
+                        update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
+                        status_bar.needs_update = true;
+                    }
+                }
+                else if (key == SDLK_o && (mod & KMOD_GUI)) {
+                    // Open file (simplified - in real app use file dialog)
+                    bool proceed = true;
+                    if (document.is_modified) {
+                        DialogResult result = show_save_confirmation_dialog(document.filename);
+                        if (result == DIALOG_YES) {
+                            // Save first
+                            if (document.filename) {
+                                if (!save_file(document.filename, editorText)) {
+                                    show_error_dialog("Save Error", "Failed to save file");
+                                    proceed = false;
+                                }
+                            } else {
+                                // Use Save As dialog for new files
+                                char *save_as_filename = get_file_dialog(true);
+                                if (save_as_filename) {
+                                    if (save_file(save_as_filename, editorText)) {
+                                        set_document_filename(&document, save_as_filename);
+                                        mark_document_modified(&document, false);
+                                    } else {
+                                        show_error_dialog("Save Error", "Failed to save file");
+                                        proceed = false;
+                                    }
+                                    free(save_as_filename);
+                                } else {
+                                    proceed = false;
+                                }
+                            }
+                        } else if (result == DIALOG_CANCEL) {
+                            proceed = false;
+                        }
+                    }
+                    
+                    if (proceed) {
+                        char *filename = simple_file_picker(false);
+                        if (filename) {
+                            char *content = NULL;
+                            if (open_file(filename, &content)) {
+                                free(editorText);
+                                editorText = content;
+                                cursorPos = 0;
+                                selectionStart = selectionEnd = -1;
+                                set_document_filename(&document, filename);
+                                mark_document_modified(&document, false);
+                                cleanup_undo_system(&undo);
+                                init_undo_system(&undo, 100);
+                                update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
+                                
+                                // Update window title
+                                snprintf(window_title, sizeof(window_title), "%s - RobusText Editor", document.filename);
+                                SDL_SetWindowTitle(window, window_title);
+                            }
+                            free(filename);
+                        }
+                    }
+                    status_bar.needs_update = true;
+                }
+                else if (key == SDLK_s && (mod & KMOD_GUI)) {
+                    // Save file
+                    if (document.is_new_file) {
+                        // Save As
+                        char *filename = simple_file_picker(true);
+                        if (filename) {
+                            if (save_file(filename, editorText)) {
+                                set_document_filename(&document, filename);
+                                mark_document_modified(&document, false);
+                                
+                                // Update window title
+                                snprintf(window_title, sizeof(window_title), "%s - RobusText Editor", document.filename);
+                                SDL_SetWindowTitle(window, window_title);
+                            }
+                            free(filename);
+                        }
+                    } else {
+                        // Save existing file
+                        if (save_file(document.filepath, editorText)) {
+                            mark_document_modified(&document, false);
+                        }
+                    }
+                    status_bar.needs_update = true;
+                }
+                // Undo/Redo
+                else if (key == SDLK_z && (mod & KMOD_GUI) && !(mod & KMOD_SHIFT)) {
+                    // Undo
+                    if (perform_undo(&undo, &editorText, &cursorPos)) {
+                        mark_document_modified(&document, true);
+                        selectionStart = selectionEnd = -1;
+                        update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
+                        status_bar.needs_update = true;
+                    }
+                }
+                else if ((key == SDLK_z && (mod & KMOD_GUI) && (mod & KMOD_SHIFT)) ||
+                         (key == SDLK_y && (mod & KMOD_GUI))) {
+                    // Redo
+                    if (perform_redo(&undo, &editorText, &cursorPos)) {
+                        mark_document_modified(&document, true);
+                        selectionStart = selectionEnd = -1;
+                        update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
+                        status_bar.needs_update = true;
+                    }
+                }
+                // Search
+                else if (key == SDLK_f && (mod & KMOD_GUI)) {
+                    search_mode = true;
+                    search.replace_mode = false;  // Regular search mode
+                    search_buffer[0] = '\0';
+                    search_buffer_pos = 0;
+                    clear_search(&search);
+                    status_bar.needs_update = true;
+                }
+                // Replace (Cmd+H)
+                else if (key == SDLK_h && (mod & KMOD_GUI)) {
+                    search_mode = true;
+                    search.replace_mode = true;  // Replace mode
+                    search_buffer[0] = '\0';
+                    search_buffer_pos = 0;
+                    clear_search(&search);
+                    status_bar.needs_update = true;
+                }
+                // Toggle Line Numbers (Cmd+L)
+                else if (key == SDLK_l && (mod & KMOD_GUI)) {
+                    toggle_line_numbers(&line_numbers);
+                    // Recalculate text area dimensions
+                    int line_numbers_width = get_line_numbers_width(&line_numbers);
+                    maxTextWidth = windowWidth - (2 * margin) - line_numbers_width;
+                    text_area_x = line_numbers_width + margin;
+                    update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
+                    status_bar.needs_update = true;
+                }
+                // Toggle Auto-save (Cmd+Shift+S)
+                else if (key == SDLK_s && (mod & KMOD_GUI) && (mod & KMOD_SHIFT)) {
+                    set_auto_save_enabled(&auto_save, !auto_save.enabled);
+                    debug_print(L"Auto-save %s\n", auto_save.enabled ? "enabled" : "disabled");
+                    status_bar.needs_update = true;
+                }
+                // Save As (Cmd+Shift+A)
+                else if (key == SDLK_a && (mod & KMOD_GUI) && (mod & KMOD_SHIFT)) {
+                    char *save_as_filename = get_file_dialog(true);
+                    if (save_as_filename) {
+                        if (save_file(save_as_filename, editorText)) {
+                            set_document_filename(&document, save_as_filename);
+                            mark_document_modified(&document, false);
+                            
+                            // Update window title
+                            snprintf(window_title, sizeof(window_title), "%s - RobusText Editor", document.filename);
+                            SDL_SetWindowTitle(window, window_title);
+                            status_bar.needs_update = true;
+                        } else {
+                            show_error_dialog("Save Error", "Failed to save file");
+                        }
+                        free(save_as_filename);
+                    }
+                }
+                // Select All
+                else if (key == SDLK_a && (mod & KMOD_GUI) && !(mod & KMOD_SHIFT)) {
+                    selectionStart = 0;
+                    selectionEnd = rd.numClusters - 1;
+                    status_bar.needs_update = true;
+                }
+                // Cut
+                else if (key == SDLK_x && (mod & KMOD_GUI)) {
+                    if (selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd) {
+                        // Copy to clipboard first
+                        int startIdx = selectionStart < selectionEnd ? selectionStart : selectionEnd;
+                        int endIdx = selectionStart < selectionEnd ? selectionEnd : selectionStart;
+                        
+                        if (startIdx < rd.numClusters && endIdx < rd.numClusters) {
+                            int startByte = rd.clusterByteIndices[startIdx];
+                            int endByte = (endIdx + 1 < rd.numClusters) ? rd.clusterByteIndices[endIdx + 1] : strlen(editorText);
+                            
+                            int selectionLen = endByte - startByte;
+                            char *selectedText = malloc(selectionLen + 1);
+                            if (selectedText) {
+                                memcpy(selectedText, editorText + startByte, selectionLen);
+                                selectedText[selectionLen] = '\0';
+                                
+                                record_delete_action(&undo, startByte, selectedText, cursorPos, startByte);
+                                SDL_SetClipboardText(selectedText);
+                                
+                                // Delete selection
+                                int new_cursor = delete_selection(&editorText, selectionStart, selectionEnd, rd.clusterByteIndices, rd.numClusters);
+                                if (new_cursor >= 0) {
+                                    cursorPos = new_cursor;
+                                    selectionStart = selectionEnd = -1;
+                                    mark_document_modified(&document, true);
+                                    update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
+                                }
+                                
+                                free(selectedText);
+                            }
+                        }
+                    }
+                    status_bar.needs_update = true;
+                }
+                // Enhanced navigation
+                else if (key == SDLK_LEFT) {
+                    if (mod & KMOD_GUI) {
+                        // Move to beginning of line
+                        cursorPos = move_cursor_line_start(editorText, cursorPos);
+                    } else if (mod & KMOD_ALT) {
+                        // Move to previous word
+                        cursorPos = move_cursor_word_left(editorText, cursorPos);
+                    } else {
+                        // Move one character left
+                        if (cursorPos > 0) {
+                            int pos = cursorPos - 1;
+                            while (pos > 0 && ((unsigned char)editorText[pos] & 0xC0) == 0x80) { pos--; }
+                            cursorPos = pos;
+                        }
+                    }
+                    selectionStart = selectionEnd = -1;
+                    status_bar.needs_update = true;
+                }
+                else if (key == SDLK_RIGHT) {
+                    int curLen = strlen(editorText);
+                    if (mod & KMOD_GUI) {
+                        // Move to end of line
+                        cursorPos = move_cursor_line_end(editorText, cursorPos);
+                    } else if (mod & KMOD_ALT) {
+                        // Move to next word
+                        cursorPos = move_cursor_word_right(editorText, cursorPos);
+                    } else {
+                        // Move one character right
+                        if (cursorPos < curLen) {
+                            int pos = cursorPos + 1;
+                            while (pos < curLen && ((unsigned char)editorText[pos] & 0xC0) == 0x80) { pos++; }
+                            cursorPos = pos;
+                        }
+                    }
+                    selectionStart = selectionEnd = -1;
+                    status_bar.needs_update = true;
+                }
+                else if (key == SDLK_HOME) {
+                    cursorPos = move_cursor_line_start(editorText, cursorPos);
+                    selectionStart = selectionEnd = -1;
+                    status_bar.needs_update = true;
+                }
+                else if (key == SDLK_END) {
+                    cursorPos = move_cursor_line_end(editorText, cursorPos);
+                    selectionStart = selectionEnd = -1;
+                    status_bar.needs_update = true;
+                }
+                else if (key == SDLK_BACKSPACE) {
+                    if (selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd) {
+                        // Delete selection
+                        int startIdx = selectionStart < selectionEnd ? selectionStart : selectionEnd;
+                        int endIdx = selectionStart < selectionEnd ? selectionEnd : selectionStart;
+                        
+                        int startByte = rd.clusterByteIndices[startIdx];
+                        int endByte = (endIdx + 1 < rd.numClusters) ? rd.clusterByteIndices[endIdx + 1] : strlen(editorText);
+                        
+                        char *deleted_text = malloc(endByte - startByte + 1);
+                        if (deleted_text) {
+                            memcpy(deleted_text, editorText + startByte, endByte - startByte);
+                            deleted_text[endByte - startByte] = '\0';
+                            record_delete_action(&undo, startByte, deleted_text, cursorPos, startByte);
+                            free(deleted_text);
+                        }
+                        
+                        int new_cursor = delete_selection(&editorText, selectionStart, selectionEnd, rd.clusterByteIndices, rd.numClusters);
+                        if (new_cursor >= 0) {
+                            cursorPos = new_cursor;
+                            selectionStart = selectionEnd = -1;
+                        }
+                    } else if (cursorPos > 0) {
+                        // Regular backspace
                         int prevPos = cursorPos - 1;
                         while (prevPos > 0 && ((unsigned char)editorText[prevPos] & 0xC0) == 0x80) {
                             prevPos--;
                         }
                         int rem = cursorPos - prevPos;
                         if (rem > 0) {
+                            char *deleted_text = malloc(rem + 1);
+                            if (deleted_text) {
+                                memcpy(deleted_text, editorText + prevPos, rem);
+                                deleted_text[rem] = '\0';
+                                record_delete_action(&undo, prevPos, deleted_text, cursorPos, prevPos);
+                                free(deleted_text);
+                            }
+                            
                             int curLen = (int)strlen(editorText);
                             char *newText = malloc(curLen - rem + 1);
                             if (!newText) continue;
@@ -146,40 +718,83 @@ void display_text_window(const char *font_path, int font_size) {
                             free(editorText);
                             editorText = newText;
                             cursorPos = prevPos;
+                        }
+                    }
+                    mark_document_modified(&document, true);
+                    update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
+                    status_bar.needs_update = true;
+                }
+                else if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
+                    // Insert newline character
+                    record_insert_action(&undo, cursorPos, "\n", cursorPos, cursorPos + 1);
+                    
+                    // Delete selection if any
+                    if (selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd) {
+                        int new_cursor = delete_selection(&editorText, selectionStart, selectionEnd, rd.clusterByteIndices, rd.numClusters);
+                        if (new_cursor >= 0) {
+                            cursorPos = new_cursor;
                             selectionStart = selectionEnd = -1;
-                            mouseSelecting = 0;
-                            update_render_data(renderer, font, editorText, margin, maxTextWidth, &rd);
+                        }
+                    }
+                    
+                    // Insert newline
+                    int curLen = (int)strlen(editorText);
+                    char *newText = malloc(curLen + 2); // +1 for newline, +1 for null terminator
+                    if (newText) {
+                        memcpy(newText, editorText, cursorPos);
+                        newText[cursorPos] = '\n';
+                        memcpy(newText + cursorPos + 1, editorText + cursorPos, curLen - cursorPos + 1);
+                        free(editorText);
+                        editorText = newText;
+                        cursorPos += 1;
+                        
+                        mark_document_modified(&document, true);
+                        update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
+                        status_bar.needs_update = true;
+                    }
+                }
+                else if (key == SDLK_ESCAPE) {
+                    selectionStart = selectionEnd = -1;
+                    mouseSelecting = 0;
+                    clear_search(&search);
+                    status_bar.needs_update = true;
+                }
+                // Copy
+                else if (key == SDLK_c && (mod & KMOD_GUI)) {
+                    if (selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd) {
+                        int startIdx = selectionStart < selectionEnd ? selectionStart : selectionEnd;
+                        int endIdx = selectionStart < selectionEnd ? selectionEnd : selectionStart;
+                        
+                        if (startIdx < rd.numClusters && endIdx < rd.numClusters) {
+                            int startByte = rd.clusterByteIndices[startIdx];
+                            int endByte = (endIdx + 1 < rd.numClusters) ? rd.clusterByteIndices[endIdx + 1] : strlen(editorText);
+                            
+                            int selectionLen = endByte - startByte;
+                            char *selectedText = malloc(selectionLen + 1);
+                            if (selectedText) {
+                                memcpy(selectedText, editorText + startByte, selectionLen);
+                                selectedText[selectionLen] = '\0';
+                                SDL_SetClipboardText(selectedText);
+                                free(selectedText);
+                            }
                         }
                     }
                 }
-                else if (event.key.keysym.sym == SDLK_LEFT) {
-                    if (cursorPos > 0) {
-                        int pos = cursorPos - 1;
-                        while (pos > 0 && ((unsigned char)editorText[pos] & 0xC0) == 0x80) { pos--; }
-                        cursorPos = pos;
-                    }
-                }
-                else if (event.key.keysym.sym == SDLK_RIGHT) {
-                    int curLen = (int)strlen(editorText);
-                    if (cursorPos < curLen) {
-                        int pos = cursorPos + 1;
-                        while (pos < curLen && ((unsigned char)editorText[pos] & 0xC0) == 0x80) { pos++; }
-                        cursorPos = pos;
-                    }
-                }
-                else if (event.key.keysym.sym == SDLK_ESCAPE) {
-                    selectionStart = selectionEnd = -1;
-                    mouseSelecting = 0;
-                }
-                else if (event.key.keysym.sym == SDLK_c && (event.key.keysym.mod & KMOD_GUI)) {
-                    if (SDL_SetClipboardText(editorText) == 0)
-                        printf("Text copied to clipboard.\n");
-                    else
-                        printf("Clipboard error: %s\n", SDL_GetError());
-                }
-                else if (event.key.keysym.sym == SDLK_v && (event.key.keysym.mod & KMOD_GUI)) {
+                // Paste
+                else if (key == SDLK_v && (mod & KMOD_GUI)) {
                     char *clipboard_text = SDL_GetClipboardText();
                     if (clipboard_text) {
+                        record_insert_action(&undo, cursorPos, clipboard_text, cursorPos, cursorPos + strlen(clipboard_text));
+                        
+                        // Delete selection if any
+                        if (selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd) {
+                            int new_cursor = delete_selection(&editorText, selectionStart, selectionEnd, rd.clusterByteIndices, rd.numClusters);
+                            if (new_cursor >= 0) {
+                                cursorPos = new_cursor;
+                                selectionStart = selectionEnd = -1;
+                            }
+                        }
+                        
                         int pasteLen = (int)strlen(clipboard_text);
                         int curLen = (int)strlen(editorText);
                         char *newText = malloc(curLen + pasteLen + 1);
@@ -190,18 +805,18 @@ void display_text_window(const char *font_path, int font_size) {
                             free(editorText);
                             editorText = newText;
                             cursorPos += pasteLen;
-                            update_render_data(renderer, font, editorText, margin, maxTextWidth, &rd);
+                            mark_document_modified(&document, true);
+                            update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
                         }
                         SDL_free(clipboard_text);
                     }
-                }
-                else if (event.key.keysym.sym == SDLK_s) {
-                    if (selectionStart < 0) selectionStart = cursorPos;
+                    status_bar.needs_update = true;
                 }
             }
             else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
-                debug_print(L"Mouse down at (%d, %d)\n", event.button.x, event.button.y);
-                if (SDL_PointInRect(&(SDL_Point){event.button.x, event.button.y}, &rd.textRect)) {
+                // Check if click is in text area (not status bar)
+                if (event.button.y < text_area_height && 
+                    SDL_PointInRect(&(SDL_Point){event.button.x, event.button.y}, &rd.textRect)) {
                     int relativeX = event.button.x - rd.textRect.x;
                     int nearestCluster = 0;
                     int minDist = INT_MAX;
@@ -221,44 +836,48 @@ void display_text_window(const char *font_path, int font_size) {
                             cursorPos = rd.clusterByteIndices[nearestCluster];
                         }
                         mouseSelecting = 1;
-                        debug_print(L"Selection started at cluster %d (byte offset %d)\n", nearestCluster, cursorPos);
                     }
+                    status_bar.needs_update = true;
                 }
             }
             else if (event.type == SDL_MOUSEMOTION && mouseSelecting) {
-                int relativeX = event.motion.x - rd.textRect.x;
-                int nearestCluster = 0;
-                int minDist = INT_MAX;
-                for (int i = 0; i < rd.numClusters; i++) {
-                    int clusterX = rd.glyphOffsets[i];
-                    int dist = abs(clusterX - relativeX);
-                    if (dist < minDist) {
-                        minDist = dist;
-                        nearestCluster = i;
+                if (event.motion.y < text_area_height) {
+                    int relativeX = event.motion.x - rd.textRect.x;
+                    int nearestCluster = 0;
+                    int minDist = INT_MAX;
+                    for (int i = 0; i < rd.numClusters; i++) {
+                        int clusterX = rd.glyphOffsets[i];
+                        int dist = abs(clusterX - relativeX);
+                        if (dist < minDist) {
+                            minDist = dist;
+                            nearestCluster = i;
+                        }
                     }
+                    selectionEnd = nearestCluster;
+                    cursorPos = rd.clusterByteIndices[nearestCluster];
+                    status_bar.needs_update = true;
                 }
-                selectionEnd = nearestCluster;
-                cursorPos = rd.clusterByteIndices[nearestCluster];
-                debug_print(L"Selection updated: %d to %d\n", selectionStart, selectionEnd);
             }
             else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
                 mouseSelecting = 0;
                 if (selectionStart >= 0) {
                     selectionEnd = get_cluster_index_at_cursor(editorText, cursorPos, rd.clusterByteIndices, rd.numClusters);
-                    debug_print(L"Selection ended at cluster %d\n", selectionEnd);
                 }
             }
         } // End event poll
 
-        debug_print(L"[FRAME %d] Update check - Last width: %d, Current width: %d\n", frame_count, lastWidth, windowWidth);
+        // Check for auto-save
+        if (should_auto_save(&auto_save, document.is_modified)) {
+            perform_auto_save(&auto_save, &document, editorText);
+        }
 
+        // Update content hash for change detection
         if (lastText) {
             uint32_t content_hash = 0;
             for (const char *p = editorText; *p; p++) {
                 content_hash = ((content_hash << 5) + content_hash) + *p;
             }
             if (content_hash != state.last_content_hash || windowWidth != state.last_width) {
-                debug_print(L"[STATE] Content change detected (hash: %u -> %u)\n", state.last_content_hash, content_hash);
                 state.needs_update = true;
                 state.last_content_hash = content_hash;
                 state.last_width = windowWidth;
@@ -266,18 +885,39 @@ void display_text_window(const char *font_path, int font_size) {
         }
 
         if (state.needs_update) {
-            debug_print(L"[RENDER] Updating text layout\n");
-            update_render_data(renderer, font, editorText, margin, maxTextWidth, &rd);
+            update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth, &rd);
             state.needs_update = false;
         }
 
+        // Update status bar
+        update_status_bar(&status_bar, renderer, &document, &search, cursorPos, editorText, windowWidth);
+        
+        // Update line numbers
+        int font_height = TTF_FontLineSkip(font);
+        int line_numbers_area_height = windowHeight - status_bar.height; // Full height minus status bar
+        int visible_lines = line_numbers_area_height / font_height;
+        update_line_numbers(&line_numbers, renderer, editorText, 1, visible_lines);
+        line_numbers.rect.y = 0; // Line numbers go all the way to the top
+
+        // Render everything
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
         SDL_SetRenderDrawColor(renderer, 22, 24, 32, 255);
         SDL_RenderClear(renderer);
 
-        SDL_RenderCopy(renderer, rd.textTexture, NULL, &rd.textRect);
+        // Render text using floating-point positioning for macOS-like precision
+        if (rd.textTexture && rd.textRect.w > 0 && rd.textRect.h > 0 && 
+            rd.textRect.x >= 0 && rd.textRect.y >= 0) {
+            SDL_FRect textRectF = {
+                (float)rd.textRect.x,
+                (float)rd.textRect.y,
+                (float)rd.textRect.w,
+                (float)rd.textRect.h
+            };
+            SDL_RenderCopyF(renderer, rd.textTexture, NULL, &textRectF);
+        }
 
-        if (mouseSelecting && selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd) {
+        // Render selection highlight
+        if (selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd) {
             int startIdx = selectionStart < selectionEnd ? selectionStart : selectionEnd;
             int endIdx = selectionStart < selectionEnd ? selectionEnd : selectionStart;
             if (startIdx < rd.numClusters && endIdx < rd.numClusters) {
@@ -287,29 +927,83 @@ void display_text_window(const char *font_path, int font_size) {
                     rd.glyphOffsets[endIdx] - rd.glyphOffsets[startIdx] + rd.clusterRects[endIdx].w,
                     rd.textRect.h
                 };
-                debug_print(L"Highlight rect: x=%d, y=%d, w=%d, h=%d\n", hl.x, hl.y, hl.w, hl.h);
                 SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
                 SDL_SetRenderDrawColor(renderer, 200, 200, 180, 128);
                 SDL_RenderFillRect(renderer, &hl);
             }
         }
 
-        int clusterIdx = get_cluster_index_at_cursor(editorText, cursorPos, rd.clusterByteIndices, rd.numClusters);
+        // Render search highlights
+        if (search.is_active && has_matches(&search)) {
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+            for (int i = 0; i < search.num_matches; i++) {
+                int match_pos = search.match_positions[i];
+                int cluster_idx = get_cluster_index_at_cursor(editorText, match_pos, rd.clusterByteIndices, rd.numClusters);
+                
+                if (cluster_idx < rd.numClusters) {
+                    SDL_Rect search_hl = {
+                        rd.textRect.x + rd.glyphOffsets[cluster_idx],
+                        rd.textRect.y,
+                        search.match_lengths[i] * 8, // Approximate width
+                        rd.textRect.h
+                    };
+                    
+                    if (i == search.current_match) {
+                        SDL_SetRenderDrawColor(renderer, 255, 255, 0, 100); // Yellow for current match
+                    } else {
+                        SDL_SetRenderDrawColor(renderer, 255, 200, 0, 80);  // Orange for other matches
+                    }
+                    SDL_RenderFillRect(renderer, &search_hl);
+                }
+            }
+        }
+
+        // Render cursor
+        int cursor_font_height = TTF_FontLineSkip(font);
+        int cursor_line = 0;
+        int line_start_pos = 0;
+        
+        // Find which line the cursor is on and the start position of that line
+        for (int i = 0; i < cursorPos && editorText[i]; i++) {
+            if (editorText[i] == '\n') {
+                cursor_line++;
+                line_start_pos = i + 1;
+            }
+        }
+        
+        // Calculate cursor position on the current line
+        int cursor_pos_in_line = cursorPos - line_start_pos;
+        
+        // Get the width of text from line start to cursor
+        char temp_line[1024] = {0};
+        int copy_len = cursor_pos_in_line;
+        if (copy_len > 1023) copy_len = 1023;
+        memcpy(temp_line, editorText + line_start_pos, copy_len);
+        
         int cursorX = rd.textRect.x;
-        if (clusterIdx < rd.numClusters)
-            cursorX += rd.glyphOffsets[clusterIdx];
-        else
-            cursorX += rd.textW;
+        if (strlen(temp_line) > 0) {
+            int text_width;
+            TTF_SizeUTF8(font, temp_line, &text_width, NULL);
+            cursorX += text_width;
+        }
+        
+        int cursorY = rd.textRect.y + (cursor_line * cursor_font_height);
+        
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-        SDL_RenderDrawLine(renderer, cursorX, rd.textRect.y, cursorX, rd.textRect.y + rd.textRect.h);
+        SDL_RenderDrawLine(renderer, cursorX, cursorY, cursorX, cursorY + cursor_font_height);
+
+        // Render line numbers
+        line_numbers.rect.y = 0; // Line numbers go all the way to the top
+        render_line_numbers(&line_numbers, renderer);
+
+        // Render status bar
+        render_status_bar(&status_bar, renderer);
 
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
         SDL_RenderPresent(renderer);
         
         uint32_t frame_time = SDL_GetTicks() - frame_start;
-        debug_print(L"[TIMING] Frame time: %dms\n", frame_time);
-        
         if (frame_time < 16) {
             SDL_Delay(16 - frame_time);
         }
@@ -317,15 +1011,17 @@ void display_text_window(const char *font_path, int font_size) {
 
     SDL_StopTextInput();
 
+    // Cleanup
     free(lastText);
-    free(rd.clusterByteIndices);
-    free(rd.glyphByteOffsets);
-    free(rd.clusterRects);
-    free(rd.glyphRects);
-    free(rd.glyphOffsets);
-    SDL_DestroyTexture(rd.textTexture);
+    cleanup_render_data(&rd);
     free(editorText);
+    cleanup_document_state(&document);
+    cleanup_undo_system(&undo);
+    cleanup_search_state(&search);
+    cleanup_status_bar(&status_bar);
+    cleanup_line_numbers(&line_numbers);
     TTF_CloseFont(font);
+    TTF_CloseFont(status_font);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     TTF_Quit();

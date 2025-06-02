@@ -29,8 +29,11 @@ typedef struct {
 
 // Add line wrapping parameter
 int update_render_data(SDL_Renderer *renderer, TTF_Font *font,
-                      const char *utf8_text, int margin, int maxWidth, RenderData *rd);
+                      const char *utf8_text, int x_offset, int y_offset, int maxWidth, RenderData *rd);
 int get_glyph_index_at_cursor(const char *text, int byte_cursor);
 int get_cluster_index_at_cursor(const char *text, int byte_cursor, const int *clusterByteIndices, int numClusters);
+
+// Cleanup function to free RenderData allocated memory
+void cleanup_render_data(RenderData *rd);
 
 #endif // TEXT_RENDERER_H
