@@ -27,7 +27,7 @@ int main(int argc, char *argv[])
     }
 
     // Removed initial text functionality:
-    display_text_window("./Inter.ttf", 24);
+    display_text_window("./SpaceMono-Regular.ttf", 24);
 
     return 0;
 }
