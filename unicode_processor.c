@@ -1,27 +1,30 @@
 #include "unicode_processor.h"
 #include "debug.h"
 
+#include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
-#include <math.h>
-#include <stdint.h>
-#include <stdbool.h>
 
 // Check if a code point is a combining character U+0300 to U+036F
-static bool is_combining(wchar_t cp) {
+static bool is_combining(wchar_t cp)
+{
     return (cp >= 0x0300 && cp <= 0x036F);
 }
 
 // Stub function to return the additional pixel spacing for a given combining character.
-static int get_combining_spacing(wchar_t cp) {
-    if(cp == 0x0301) {
+static int get_combining_spacing(wchar_t cp)
+{
+    if (cp == 0x0301) {
         return 2;
     }
     return 4;
 }
 
-void process_unicode_string(const wchar_t *input, int screen_width, int smooth_scroll_buffer) {
+void process_unicode_string(const wchar_t *input, int screen_width, int smooth_scroll_buffer)
+{
     debug_print(L"Input string: %ls\n", input);
 
     // Backup the original Unicode string.
@@ -78,11 +81,11 @@ void process_unicode_string(const wchar_t *input, int screen_width, int smooth_s
         if (combiner_freq[i] > 0) {
             wchar_t combiner = 0x0300 + i;
             int spacing = get_combining_spacing(combiner);
-            int allowed = smooth_scroll_buffer + (int)ceil(screen_width / (double)spacing);
-            wprintf(L"Combiner U+%04X: count = %d, allowed = %d\n",
-                    (unsigned int)combiner, combiner_freq[i], allowed);
-            debug_print(L"Combiner U+%04X: count = %d, allowed = %d\n",
-                        (unsigned int)combiner, combiner_freq[i], allowed);
+            int allowed = smooth_scroll_buffer + (int) ceil(screen_width / (double) spacing);
+            wprintf(L"Combiner U+%04X: count = %d, allowed = %d\n", (unsigned int) combiner,
+                    combiner_freq[i], allowed);
+            debug_print(L"Combiner U+%04X: count = %d, allowed = %d\n", (unsigned int) combiner,
+                        combiner_freq[i], allowed);
         }
     }
 

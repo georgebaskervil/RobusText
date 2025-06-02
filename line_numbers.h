@@ -16,11 +16,13 @@ typedef struct {
 } LineNumbers;
 
 // Initialize and cleanup
-void init_line_numbers(LineNumbers *line_nums, SDL_Renderer *renderer, TTF_Font *font, int window_height);
+void init_line_numbers(LineNumbers *line_nums, SDL_Renderer *renderer, TTF_Font *font,
+                       int window_height);
 void cleanup_line_numbers(LineNumbers *line_nums);
 
 // Update and render
-void update_line_numbers(LineNumbers *line_nums, SDL_Renderer *renderer, const char *text, int first_visible_line, int visible_lines);
+void update_line_numbers(LineNumbers *line_nums, SDL_Renderer *renderer, const char *text,
+                         int first_visible_line, int visible_lines);
 void render_line_numbers(LineNumbers *line_nums, SDL_Renderer *renderer);
 void resize_line_numbers(LineNumbers *line_nums, int window_height);
 

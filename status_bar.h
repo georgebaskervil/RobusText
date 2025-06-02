@@ -1,10 +1,10 @@
 #ifndef STATUS_BAR_H
 #define STATUS_BAR_H
 
-#include <SDL.h>
-#include <SDL_ttf.h>
 #include "file_operations.h"
 #include "search_system.h"
+#include <SDL.h>
+#include <SDL_ttf.h>
 
 typedef struct {
     SDL_Texture *texture;
@@ -15,13 +15,14 @@ typedef struct {
 } StatusBar;
 
 // Initialize and cleanup
-void init_status_bar(StatusBar *status, SDL_Renderer *renderer, TTF_Font *font, int window_width, int window_height);
+void init_status_bar(StatusBar *status, SDL_Renderer *renderer, TTF_Font *font, int window_width,
+                     int window_height);
 void cleanup_status_bar(StatusBar *status);
 
 // Update status bar content
-void update_status_bar(StatusBar *status, SDL_Renderer *renderer, 
-                       const DocumentState *doc, const SearchState *search,
-                       int cursor_pos, const char *text, int window_width);
+void update_status_bar(StatusBar *status, SDL_Renderer *renderer, const DocumentState *doc,
+                       const SearchState *search, int cursor_pos, const char *text,
+                       int window_width);
 
 // Render status bar
 void render_status_bar(StatusBar *status, SDL_Renderer *renderer);

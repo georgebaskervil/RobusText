@@ -3,11 +3,7 @@
 
 #include <stdbool.h>
 
-typedef enum {
-    UNDO_INSERT,
-    UNDO_DELETE,
-    UNDO_REPLACE
-} UndoType;
+typedef enum { UNDO_INSERT, UNDO_DELETE, UNDO_REPLACE } UndoType;
 
 typedef struct UndoAction {
     UndoType type;
@@ -32,8 +28,10 @@ void init_undo_system(UndoSystem *undo, int max_actions);
 void cleanup_undo_system(UndoSystem *undo);
 
 // Record actions
-void record_insert_action(UndoSystem *undo, int position, const char *text, int cursor_before, int cursor_after);
-void record_delete_action(UndoSystem *undo, int position, const char *deleted_text, int cursor_before, int cursor_after);
+void record_insert_action(UndoSystem *undo, int position, const char *text, int cursor_before,
+                          int cursor_after);
+void record_delete_action(UndoSystem *undo, int position, const char *deleted_text,
+                          int cursor_before, int cursor_after);
 
 // Undo/Redo operations
 bool can_undo(UndoSystem *undo);

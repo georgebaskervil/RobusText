@@ -52,7 +52,7 @@ The editor features a **modular architecture** with separate systems:
      ```sh
      brew install sdl2 sdl2_ttf
      ```
-     
+
 2. **Clone the Repository:**
    ```sh
    git clone https://github.com/yourusername/RobusText.git
@@ -64,6 +64,9 @@ The editor features a **modular architecture** with separate systems:
 The editor runs entirely through the GUI - no CLI interactions required.
 
 ```sh
+# Set up code formatting (one-time setup)
+./setup-formatting.sh
+
 # Compile the project
 make
 
@@ -76,9 +79,37 @@ make
 # Show help
 ./main --help
 
+# Format code
+make format
+
+# Check formatting
+make check-format
+
 # Run automated tests
 ./test_features.sh
 ```
+
+## Code Formatting
+
+This project uses `clang-format` for consistent C code formatting and `pre-commit` hooks for automated formatting on commits.
+
+### Setup (One-time)
+```sh
+./setup-formatting.sh
+```
+
+### Available Commands
+- `make format` - Format all C source files
+- `make check-format` - Check if code is properly formatted
+- `make install-hooks` - Install/reinstall pre-commit hooks
+
+### Pre-commit Hooks
+Pre-commit hooks automatically:
+- Format C code with clang-format
+- Remove trailing whitespace
+- Fix end-of-file issues
+- Check for merge conflicts
+- Verify the code compiles
 
 **Key Features:**
 - File operations use sensible defaults (auto-save, default filenames)

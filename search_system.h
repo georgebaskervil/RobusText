@@ -5,7 +5,7 @@
 
 typedef struct {
     char *search_term;
-    char *replace_term;  // New field for replace functionality
+    char *replace_term; // New field for replace functionality
     int *match_positions;
     int *match_lengths;
     int num_matches;
@@ -13,7 +13,7 @@ typedef struct {
     bool case_sensitive;
     bool whole_word;
     bool is_active;
-    bool replace_mode;   // New field to track if in replace mode
+    bool replace_mode; // New field to track if in replace mode
 } SearchState;
 
 // Initialize and cleanup
@@ -29,8 +29,8 @@ int get_current_match_length(SearchState *search);
 
 // Replace operations
 void set_replace_term(SearchState *search, const char *replace_term);
-char* replace_current_match(SearchState *search, const char *text);
-char* replace_all_matches(SearchState *search, const char *text);
+char *replace_current_match(SearchState *search, const char *text);
+char *replace_all_matches(SearchState *search, const char *text);
 
 // Search options
 void set_case_sensitive(SearchState *search, bool sensitive);

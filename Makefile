@@ -14,3 +14,31 @@ $(TARGET): $(SOURCES)
 
 clean:
 	rm -f $(TARGET)
+
+format:
+	./format.sh
+
+check-format:
+	@echo "Checking code formatting..."
+	@./format.sh > /dev/null
+	@if git diff --quiet; then \
+		echo "✓ Code is properly formatted"; \
+	else \
+		echo "✗ Code formatting issues found. Run 'make format' to fix."; \
+		git diff --name-only; \
+		exit 1; \
+	fi
+
+install-hooks:
+	@echo "Installing pre-commit hooks..."
+	@if command -v pre-commit >/dev/null 2>&1; then \
+		pre-commit install; \
+		echo "✓ Pre-commit hooks installed"; \
+	else \
+		echo "Installing pre-commit..."; \
+		pip3 install pre-commit; \
+		pre-commit install; \
+		echo "✓ Pre-commit installed and hooks configured"; \
+	fi
+
+.PHONY: all clean format check-format install-hooks

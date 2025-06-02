@@ -1,13 +1,14 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <wchar.h>
-#include <locale.h>
-#include <string.h>
-#include "unicode_processor.h"
 #include "debug.h"
 #include "sdl_window.h"
+#include "unicode_processor.h"
+#include <locale.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
     setlocale(LC_ALL, "");
 
     // Parse command line arguments
@@ -30,4 +31,3 @@ int main(int argc, char *argv[]) {
 
     return 0;
 }
-

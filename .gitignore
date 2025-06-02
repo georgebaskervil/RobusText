@@ -1,1 +1,24 @@
+# Build artifacts
 main
+*.o
+*.a
+*.so
+*.dylib
+
+# Debug information
+*.dSYM/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup

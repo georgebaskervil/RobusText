@@ -1,13 +1,13 @@
 #ifndef AUTO_SAVE_H
 #define AUTO_SAVE_H
 
+#include "file_operations.h"
 #include <stdbool.h>
 #include <stdint.h>
-#include "file_operations.h"
 
 typedef struct {
     uint32_t last_save_time;
-    uint32_t save_interval;  // in milliseconds
+    uint32_t save_interval; // in milliseconds
     bool enabled;
     bool needs_save;
 } AutoSave;
