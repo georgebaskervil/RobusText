@@ -119,10 +119,47 @@ int update_render_data(SDL_Renderer *renderer, TTF_Font *font, const char *utf8_
     size_t text_len = strlen(utf8_text);
     debug_print(L"[UPDATE %d] Received text of length %u: \"%hs\"\n", update_count,
                 (unsigned) text_len, utf8_text);
+    // Check if text is empty
     if (!utf8_text || !*utf8_text) {
-        debug_print(L"[UPDATE %d] Text is empty. Skipping layout.\n", update_count);
+        debug_print(L"[UPDATE %d] Text is empty. Cleaning up and skipping layout.\n", update_count);
+
+        // Clean up any existing allocations
+        if (rd->textTexture) {
+            SDL_DestroyTexture(rd->textTexture);
+            rd->textTexture = NULL;
+        }
+        if (rd->glyphOffsets) {
+            free(rd->glyphOffsets);
+            rd->glyphOffsets = NULL;
+        }
+        if (rd->clusterByteIndices) {
+            free(rd->clusterByteIndices);
+            rd->clusterByteIndices = NULL;
+        }
+        if (rd->glyphRects) {
+            free(rd->glyphRects);
+            rd->glyphRects = NULL;
+        }
+        if (rd->clusterRects) {
+            free(rd->clusterRects);
+            rd->clusterRects = NULL;
+        }
+        if (rd->lineBreaks) {
+            free(rd->lineBreaks);
+            rd->lineBreaks = NULL;
+        }
+        if (rd->lineWidths) {
+            free(rd->lineWidths);
+            rd->lineWidths = NULL;
+        }
+        if (rd->glyphByteOffsets) {
+            free(rd->glyphByteOffsets);
+            rd->glyphByteOffsets = NULL;
+        }
+
         rd->numGlyphs = 0;
         rd->numClusters = 0;
+        rd->numLines = 0;
         rd->textW = 0;
         rd->textH = TTF_FontHeight(font);
         rd->textRect.x = x_offset;
@@ -183,14 +220,34 @@ int update_render_data(SDL_Renderer *renderer, TTF_Font *font, const char *utf8_
         SDL_DestroyTexture(rd->textTexture);
         rd->textTexture = NULL;
     }
-    if (rd->glyphOffsets)
+    if (rd->glyphOffsets) {
         free(rd->glyphOffsets);
-    if (rd->clusterByteIndices)
+        rd->glyphOffsets = NULL;
+    }
+    if (rd->clusterByteIndices) {
         free(rd->clusterByteIndices);
-    if (rd->glyphRects)
+        rd->clusterByteIndices = NULL;
+    }
+    if (rd->glyphRects) {
         free(rd->glyphRects);
-    if (rd->clusterRects)
+        rd->glyphRects = NULL;
+    }
+    if (rd->clusterRects) {
         free(rd->clusterRects);
+        rd->clusterRects = NULL;
+    }
+    if (rd->glyphByteOffsets) {
+        free(rd->glyphByteOffsets);
+        rd->glyphByteOffsets = NULL;
+    }
+    if (rd->lineBreaks) {
+        free(rd->lineBreaks);
+        rd->lineBreaks = NULL;
+    }
+    if (rd->lineWidths) {
+        free(rd->lineWidths);
+        rd->lineWidths = NULL;
+    }
 
     rd->glyphOffsets = malloc(char_count * sizeof(int));
     rd->clusterByteIndices = malloc(char_count * sizeof(int));
