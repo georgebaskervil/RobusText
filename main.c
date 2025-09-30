@@ -6,10 +6,57 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+// Optional: mimalloc can be used as a drop-in replacement allocator.
+// We'll set mimalloc runtime options here when available to bake-in optimizations.
+#ifdef __has_include
+#if __has_include(<mimalloc.h>)
+#define MI_MALLOC_REDIRECT /* redirect malloc/free to mimalloc names */
+#include <mimalloc.h>
+#endif
+#endif
 
 int main(int argc, char *argv[])
 {
     setlocale(LC_ALL, "");
+
+    /* If mimalloc is available at build/link time, configure runtime options
+        early so they apply before any allocations. These mirror the
+        environment-variable equivalents but are embedded in the binary.
+        We wrap calls in a runtime check to avoid build failures when the
+        header isn't present. */
+#if defined(__has_include) && __has_include(<mimalloc.h>)
+    /* Enable large OS pages (2/4MiB), eager arena commit, segment cache,
+        immediate purge, decommit on purge, reserve huge OS pages, small
+        eager commit delay and limit NUMA nodes to 1 for macOS. */
+    mi_option_set(mi_option_allow_large_os_pages, 1);
+    mi_option_set(mi_option_arena_eager_commit, 1);
+    /* the segment cache option was renamed/deprecated in newer mimalloc
+        versions; use the header-provided enum name to remain compatible */
+    mi_option_set(mi_option_deprecated_segment_cache, 1);
+    mi_option_set(mi_option_purge_delay, 0);
+    mi_option_set(mi_option_purge_decommits, 1);
+    mi_option_set(mi_option_reserve_huge_os_pages, 1);
+    mi_option_set(mi_option_eager_commit_delay, 2);
+    mi_option_set(mi_option_use_numa_nodes, 1);
+    /* Optionally enable showing stats on exit for verification (commented
+        out by default). Uncomment to print mimalloc stats when the process
+        exits. */
+    /* mi_option_set(mi_option_show_stats, 1); */
+#if defined(__APPLE__)
+/* runtime diagnostic: check whether the mimalloc symbol is present in
+   the process. On macOS `dlsym("malloc")` may still point to libc's
+   malloc even when our translation units are redirected to `mi_malloc`.
+   So instead check for the presence of `mi_malloc` directly. */
+/* delay including dlfcn.h until needed to avoid dependency when mimalloc isn't present */
+#include <dlfcn.h>
+    void *mi_malloc_sym = dlsym(RTLD_DEFAULT, "mi_malloc");
+    if (mi_malloc_sym != NULL) {
+        fprintf(stderr, "mimalloc symbol present: mi_malloc=%p\n", mi_malloc_sym);
+    } else {
+        fprintf(stderr, "mimalloc symbol NOT found via dlsym\n");
+    }
+#endif
+#endif
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
