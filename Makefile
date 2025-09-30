@@ -1,8 +1,8 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -g -I/opt/homebrew/include/SDL2
-LDFLAGS = -L/opt/homebrew/lib
+CFLAGS = -O3 -march=native -mtune=native -flto -funroll-loops -fomit-frame-pointer -ffast-math -Wall -Wextra -pipe -g -I/opt/homebrew/include/SDL2
+LDFLAGS = -flto -Wl,-dead_strip -L/opt/homebrew/lib
 LIBS = -lSDL2 -lSDL2_ttf
-TARGET = main
+TARGET = RobusText
 
 SOURCES = main.c debug.c unicode_processor.c sdl_window.c text_renderer.c \
           file_operations.c undo_system.c search_system.c status_bar.c line_numbers.c auto_save.c dialog.c

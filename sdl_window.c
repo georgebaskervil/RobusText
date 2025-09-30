@@ -197,9 +197,21 @@ static void *render_thread_func(void *arg)
 
                     ctx->status_bar->needs_update = true;
                 }
+            } else if (event.type == SDL_MOUSEWHEEL) {
+                // Handle wheel events in render thread as well (continuous resize mode)
+                int line_h = TTF_FontLineSkip(ctx->font);
+                ctx->rd->scrollY -= event.wheel.y * line_h * 3;
+                if (ctx->rd->scrollY < 0)
+                    ctx->rd->scrollY = 0;
+                if (ctx->rd->textH > 0 &&
+                    ctx->rd->scrollY > ctx->rd->textH - *ctx->text_area_height)
+                    ctx->rd->scrollY = ctx->rd->textH - *ctx->text_area_height;
+                if (ctx->rd->lazy_mode)
+                    prepare_visible_texture(ctx->renderer, ctx->font, *ctx->editorText,
+                                            *ctx->text_area_x, *ctx->text_area_y,
+                                            *ctx->maxTextWidth, ctx->rd, ctx->rd->scrollY,
+                                            *ctx->text_area_height);
             }
-            // Note: All other events (text input, key events, mouse events)
-            // are handled by the main thread, not the render thread
         }
 
         // Always render frame to maintain smooth updates during resize
@@ -250,6 +262,11 @@ static void render_frame(RenderContext *ctx)
         if (content_changed || layout_changed) {
             update_render_data(renderer, font, editorText, *ctx->text_area_x, *ctx->text_area_y,
                                *ctx->maxTextWidth, rd);
+            if (rd->lazy_mode) {
+                prepare_visible_texture(renderer, font, editorText, *ctx->text_area_x,
+                                        *ctx->text_area_y, *ctx->maxTextWidth, rd, rd->scrollY,
+                                        *ctx->text_area_height);
+            }
         }
 
         // Update tracking variables
@@ -277,12 +294,46 @@ static void render_frame(RenderContext *ctx)
     SDL_SetRenderDrawColor(renderer, 22, 24, 32, 255);
     SDL_RenderClear(renderer);
 
+    // Calculate cursor line early so we can ensure it is visible (adjust scrollY)
+    int cursor_font_height = TTF_FontLineSkip(font);
+    int cursor_line = 0;
+    int line_start_pos = 0;
+    for (int i = 0; i < cursorPos && editorText[i]; i++) {
+        if (editorText[i] == '\n') {
+            cursor_line++;
+            line_start_pos = i + 1;
+        }
+    }
+
+    // Ensure scrollY is within valid bounds
+    if (rd->scrollY < 0)
+        rd->scrollY = 0;
+    if (rd->textH > 0 && rd->scrollY > rd->textH - *ctx->text_area_height)
+        rd->scrollY = rd->textH - *ctx->text_area_height;
+
+    // Adjust scroll to make cursor visible (simple policy: if cursor above or below viewport, snap)
+    int cursorY_for_scroll = rd->textRect.y + (cursor_line * cursor_font_height);
+    int viewTop = rd->textRect.y;
+    int viewBottom = rd->textRect.y + *ctx->text_area_height - cursor_font_height;
+    if (cursorY_for_scroll < viewTop) {
+        rd->scrollY = 0; // scroll to top
+    } else if (cursorY_for_scroll > viewBottom) {
+        // Move scroll so cursor line is visible at bottom
+        int desired =
+            cursorY_for_scroll - rd->textRect.y - (*ctx->text_area_height - cursor_font_height);
+        if (desired < 0)
+            desired = 0;
+        rd->scrollY = desired;
+    }
+
     // Render text using floating-point positioning for macOS-like precision
     if (rd->textTexture && rd->textRect.w > 0 && rd->textRect.h > 0 && rd->textRect.x >= 0 &&
         rd->textRect.y >= 0) {
-        SDL_FRect textRectF = {(float) rd->textRect.x, (float) rd->textRect.y,
-                               (float) rd->textRect.w, (float) rd->textRect.h};
-        SDL_RenderCopyF(renderer, rd->textTexture, NULL, &textRectF);
+        // Source rect selects the visible portion of the texture based on scrollY
+        SDL_Rect src = {0, rd->scrollY, rd->textRect.w, *ctx->text_area_height};
+        SDL_FRect dst = {(float) rd->textRect.x, (float) rd->textRect.y, (float) rd->textRect.w,
+                         (float) *ctx->text_area_height};
+        SDL_RenderCopyF(renderer, rd->textTexture, &src, &dst);
     }
 
     // Render selection highlight
@@ -305,8 +356,7 @@ static void render_frame(RenderContext *ctx)
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
         for (int i = 0; i < search->num_matches; i++) {
             int match_pos = search->match_positions[i];
-            int cluster_idx = get_cluster_index_at_cursor(editorText, match_pos,
-                                                          rd->clusterByteIndices, rd->numClusters);
+            int cluster_idx = get_cluster_index_at_cursor(editorText, match_pos, rd);
 
             if (cluster_idx < rd->numClusters) {
                 SDL_Rect search_hl = {rd->textRect.x + rd->glyphOffsets[cluster_idx],
@@ -324,19 +374,7 @@ static void render_frame(RenderContext *ctx)
         }
     }
 
-    // Render cursor
-    int cursor_font_height = TTF_FontLineSkip(font);
-    int cursor_line = 0;
-    int line_start_pos = 0;
-
-    // Find which line the cursor is on and the start position of that line
-    for (int i = 0; i < cursorPos && editorText[i]; i++) {
-        if (editorText[i] == '\n') {
-            cursor_line++;
-            line_start_pos = i + 1;
-        }
-    }
-
+    // Render cursor (cursor_line and line_start_pos were computed earlier)
     // Calculate cursor position on the current line
     int cursor_pos_in_line = cursorPos - line_start_pos;
 
@@ -472,6 +510,41 @@ static int delete_selection(char **text, int selection_start, int selection_end,
     return start_byte;
 }
 
+// Lazy deletion helper that works with RenderData (does not require a full cluster
+// byte indices array to be present). Returns new cursor byte offset or -1.
+static int delete_selection_lazy(char **text, int selection_start, int selection_end,
+                                 RenderData *rd)
+{
+    if (!rd || !text)
+        return -1;
+    if (selection_start < 0 || selection_end < 0 || selection_start == selection_end) {
+        return -1; // No selection
+    }
+
+    int start_idx = selection_start < selection_end ? selection_start : selection_end;
+    int end_idx = selection_start < selection_end ? selection_end : selection_start;
+
+    int start_byte = get_cluster_byte_offset(rd, *text, start_idx);
+    int end_byte = get_cluster_byte_offset(rd, *text, end_idx + 1);
+    if (start_byte < 0)
+        return -1;
+    if (end_byte < 0)
+        end_byte = strlen(*text);
+
+    int text_len = strlen(*text);
+    char *new_text = malloc(text_len - (end_byte - start_byte) + 1);
+    if (!new_text)
+        return -1;
+
+    memcpy(new_text, *text, start_byte);
+    memcpy(new_text + start_byte, *text + end_byte, text_len - end_byte + 1);
+
+    free(*text);
+    *text = new_text;
+
+    return start_byte;
+}
+
 // Simple file picker (basic implementation)
 static char *simple_file_picker(bool is_save)
 {
@@ -479,7 +552,7 @@ static char *simple_file_picker(bool is_save)
     return get_file_dialog(is_save);
 }
 
-void display_text_window(const char *font_path, int font_size)
+void display_text_window(const char *font_path, int font_size, const char *initial_file)
 {
     debug_print(L"Entering display_text_window\n");
 
@@ -567,8 +640,21 @@ void display_text_window(const char *font_path, int font_size)
 
     RenderData rd = {0};
 
-    // Use a dynamic buffer for editable text. Start with empty text.
-    char *editorText = strdup("");
+    // Use a dynamic buffer for editable text. Start with empty text or load initial file
+    char *editorText = NULL;
+    if (initial_file) {
+        char *content = NULL;
+        if (open_file((char *) initial_file, &content)) {
+            editorText = content;
+            set_document_filename(&document, strdup(initial_file));
+            mark_document_modified(&document, false);
+        } else {
+            // Fall back to empty text if open failed
+            editorText = strdup("");
+        }
+    } else {
+        editorText = strdup("");
+    }
     if (!editorText) { /* error handling */
         return;
     }
@@ -701,6 +787,21 @@ void display_text_window(const char *font_path, int font_size)
             // Regular mode - process events normally
             while (SDL_PollEvent(&event)) {
             handle_normal_event:
+                // Mouse wheel: scroll viewport
+                if (event.type == SDL_MOUSEWHEEL) {
+                    int line_h = TTF_FontLineSkip(font);
+                    rd.scrollY -= event.wheel.y * line_h * 3;
+                    if (rd.scrollY < 0)
+                        rd.scrollY = 0;
+                    if (rd.textH > 0 && rd.scrollY > rd.textH - text_area_height)
+                        rd.scrollY = rd.textH - text_area_height;
+                    if (rd.lazy_mode)
+                        prepare_visible_texture(renderer, font, editorText, text_area_x,
+                                                text_area_y, maxTextWidth, &rd, rd.scrollY,
+                                                text_area_height);
+                    continue;
+                }
+
                 if (event.type == SDL_QUIT) {
                     if (document.is_modified) {
                         debug_print(L"Warning: Closing with unsaved changes\n");
@@ -746,13 +847,27 @@ void display_text_window(const char *font_path, int font_size)
                     record_insert_action(&undo, cursorPos, event.text.text, cursorPos,
                                          cursorPos + strlen(event.text.text));
 
+                    // Invalidate cached blocks after insertion point (conservative for affected
+                    // blocks)
+                    if (rd.lazy_mode) {
+                        int cluster_at_cursor =
+                            get_cluster_index_at_cursor(editorText, cursorPos, &rd);
+                        invalidate_cluster_blocks_after(&rd, cluster_at_cursor);
+                    }
+
                     // Delete selection if any
                     if (selectionStart >= 0 && selectionEnd >= 0 &&
                         selectionStart != selectionEnd) {
-                        int new_cursor = delete_selection(&editorText, selectionStart, selectionEnd,
-                                                          rd.clusterByteIndices, rd.numClusters);
+                        int new_cursor =
+                            delete_selection_lazy(&editorText, selectionStart, selectionEnd, &rd);
                         if (new_cursor >= 0) {
                             cursorPos = new_cursor;
+                            // Invalidate cached blocks starting at deletion start
+                            if (rd.lazy_mode) {
+                                int startIdx =
+                                    selectionStart < selectionEnd ? selectionStart : selectionEnd;
+                                invalidate_cluster_blocks_after(&rd, startIdx);
+                            }
                             selectionStart = selectionEnd = -1;
                         }
                     }
@@ -938,6 +1053,8 @@ void display_text_window(const char *font_path, int font_size)
                                     init_undo_system(&undo, 100);
                                     update_render_data(renderer, font, editorText, text_area_x,
                                                        text_area_y, maxTextWidth, &rd);
+                                    if (rd.lazy_mode)
+                                        invalidate_cluster_blocks_after(&rd, 0);
 
                                     // Update window title
                                     snprintf(window_title, sizeof(window_title),
@@ -1065,10 +1182,12 @@ void display_text_window(const char *font_path, int font_size)
                                 selectionStart < selectionEnd ? selectionEnd : selectionStart;
 
                             if (startIdx < rd.numClusters && endIdx < rd.numClusters) {
-                                int startByte = rd.clusterByteIndices[startIdx];
-                                int endByte = (endIdx + 1 < rd.numClusters)
-                                                  ? rd.clusterByteIndices[endIdx + 1]
-                                                  : strlen(editorText);
+                                int startByte = get_cluster_byte_offset(&rd, editorText, startIdx);
+                                int endByte = get_cluster_byte_offset(&rd, editorText, endIdx + 1);
+                                if (startByte < 0)
+                                    startByte = 0;
+                                if (endByte < 0)
+                                    endByte = strlen(editorText);
 
                                 int selectionLen = endByte - startByte;
                                 char *selectedText = malloc(selectionLen + 1);
@@ -1081,11 +1200,17 @@ void display_text_window(const char *font_path, int font_size)
                                     SDL_SetClipboardText(selectedText);
 
                                     // Delete selection
-                                    int new_cursor =
-                                        delete_selection(&editorText, selectionStart, selectionEnd,
-                                                         rd.clusterByteIndices, rd.numClusters);
+                                    int new_cursor = delete_selection_lazy(
+                                        &editorText, selectionStart, selectionEnd, &rd);
                                     if (new_cursor >= 0) {
                                         cursorPos = new_cursor;
+                                        // Invalidate cached blocks beginning at deletion start
+                                        if (rd.lazy_mode) {
+                                            int startIdx = selectionStart < selectionEnd
+                                                               ? selectionStart
+                                                               : selectionEnd;
+                                            invalidate_cluster_blocks_after(&rd, startIdx);
+                                        }
                                         selectionStart = selectionEnd = -1;
                                         mark_document_modified(&document, true);
                                         update_render_data(renderer, font, editorText, text_area_x,
@@ -1144,6 +1269,26 @@ void display_text_window(const char *font_path, int font_size)
                         cursorPos = move_cursor_line_start(editorText, cursorPos);
                         selectionStart = selectionEnd = -1;
                         status_bar.needs_update = true;
+                    } else if (key == SDLK_PAGEUP) {
+                        // Page up
+                        rd.scrollY -= text_area_height;
+                        if (rd.scrollY < 0)
+                            rd.scrollY = 0;
+                        if (rd.lazy_mode)
+                            prepare_visible_texture(renderer, font, editorText, text_area_x,
+                                                    text_area_y, maxTextWidth, &rd, rd.scrollY,
+                                                    text_area_height);
+                        status_bar.needs_update = true;
+                    } else if (key == SDLK_PAGEDOWN) {
+                        // Page down
+                        rd.scrollY += text_area_height;
+                        if (rd.textH > 0 && rd.scrollY > rd.textH - text_area_height)
+                            rd.scrollY = rd.textH - text_area_height;
+                        if (rd.lazy_mode)
+                            prepare_visible_texture(renderer, font, editorText, text_area_x,
+                                                    text_area_y, maxTextWidth, &rd, rd.scrollY,
+                                                    text_area_height);
+                        status_bar.needs_update = true;
                     } else if (key == SDLK_END) {
                         cursorPos = move_cursor_line_end(editorText, cursorPos);
                         selectionStart = selectionEnd = -1;
@@ -1157,10 +1302,12 @@ void display_text_window(const char *font_path, int font_size)
                             int endIdx =
                                 selectionStart < selectionEnd ? selectionEnd : selectionStart;
 
-                            int startByte = rd.clusterByteIndices[startIdx];
-                            int endByte = (endIdx + 1 < rd.numClusters)
-                                              ? rd.clusterByteIndices[endIdx + 1]
-                                              : strlen(editorText);
+                            int startByte = get_cluster_byte_offset(&rd, editorText, startIdx);
+                            int endByte = get_cluster_byte_offset(&rd, editorText, endIdx + 1);
+                            if (startByte < 0)
+                                startByte = 0;
+                            if (endByte < 0)
+                                endByte = strlen(editorText);
 
                             char *deleted_text = malloc(endByte - startByte + 1);
                             if (deleted_text) {
@@ -1171,11 +1318,15 @@ void display_text_window(const char *font_path, int font_size)
                                 free(deleted_text);
                             }
 
-                            int new_cursor =
-                                delete_selection(&editorText, selectionStart, selectionEnd,
-                                                 rd.clusterByteIndices, rd.numClusters);
+                            int new_cursor = delete_selection_lazy(&editorText, selectionStart,
+                                                                   selectionEnd, &rd);
                             if (new_cursor >= 0) {
                                 cursorPos = new_cursor;
+                                if (rd.lazy_mode) {
+                                    int startIdx = selectionStart < selectionEnd ? selectionStart
+                                                                                 : selectionEnd;
+                                    invalidate_cluster_blocks_after(&rd, startIdx);
+                                }
                                 selectionStart = selectionEnd = -1;
                             }
                         } else if (cursorPos > 0) {
@@ -1196,6 +1347,13 @@ void display_text_window(const char *font_path, int font_size)
                                     free(deleted_text);
                                 }
 
+                                // Compute cluster index at prevPos before modifying text
+                                int cluster_before = -1;
+                                if (rd.lazy_mode) {
+                                    cluster_before =
+                                        get_cluster_index_at_cursor(editorText, prevPos, &rd);
+                                }
+
                                 int curLen = (int) strlen(editorText);
                                 char *newText = malloc(curLen - rem + 1);
                                 if (!newText)
@@ -1208,6 +1366,9 @@ void display_text_window(const char *font_path, int font_size)
                                 free(editorText);
                                 editorText = newText;
                                 cursorPos = prevPos;
+                                if (rd.lazy_mode && cluster_before >= 0) {
+                                    invalidate_cluster_blocks_after(&rd, cluster_before);
+                                }
                             }
                         }
                         mark_document_modified(&document, true);
@@ -1221,9 +1382,8 @@ void display_text_window(const char *font_path, int font_size)
                         // Delete selection if any
                         if (selectionStart >= 0 && selectionEnd >= 0 &&
                             selectionStart != selectionEnd) {
-                            int new_cursor =
-                                delete_selection(&editorText, selectionStart, selectionEnd,
-                                                 rd.clusterByteIndices, rd.numClusters);
+                            int new_cursor = delete_selection_lazy(&editorText, selectionStart,
+                                                                   selectionEnd, &rd);
                             if (new_cursor >= 0) {
                                 cursorPos = new_cursor;
                                 selectionStart = selectionEnd = -1;
@@ -1264,10 +1424,12 @@ void display_text_window(const char *font_path, int font_size)
                                 selectionStart < selectionEnd ? selectionEnd : selectionStart;
 
                             if (startIdx < rd.numClusters && endIdx < rd.numClusters) {
-                                int startByte = rd.clusterByteIndices[startIdx];
-                                int endByte = (endIdx + 1 < rd.numClusters)
-                                                  ? rd.clusterByteIndices[endIdx + 1]
-                                                  : strlen(editorText);
+                                int startByte = get_cluster_byte_offset(&rd, editorText, startIdx);
+                                int endByte = get_cluster_byte_offset(&rd, editorText, endIdx + 1);
+                                if (startByte < 0)
+                                    startByte = 0;
+                                if (endByte < 0)
+                                    endByte = strlen(editorText);
 
                                 int selectionLen = endByte - startByte;
                                 char *selectedText = malloc(selectionLen + 1);
@@ -1290,9 +1452,8 @@ void display_text_window(const char *font_path, int font_size)
                             // Delete selection if any
                             if (selectionStart >= 0 && selectionEnd >= 0 &&
                                 selectionStart != selectionEnd) {
-                                int new_cursor =
-                                    delete_selection(&editorText, selectionStart, selectionEnd,
-                                                     rd.clusterByteIndices, rd.numClusters);
+                                int new_cursor = delete_selection_lazy(&editorText, selectionStart,
+                                                                       selectionEnd, &rd);
                                 if (new_cursor >= 0) {
                                     cursorPos = new_cursor;
                                     selectionStart = selectionEnd = -1;
@@ -1340,7 +1501,9 @@ void display_text_window(const char *font_path, int font_size)
                             }
                             selectionStart = nearestCluster;
                             if (nearestCluster < rd.numClusters) {
-                                cursorPos = rd.clusterByteIndices[nearestCluster];
+                                int off = get_cluster_byte_offset(&rd, editorText, nearestCluster);
+                                if (off >= 0)
+                                    cursorPos = off;
                             }
                             mouseSelecting = 1;
                         }
@@ -1360,15 +1523,18 @@ void display_text_window(const char *font_path, int font_size)
                             }
                         }
                         selectionEnd = nearestCluster;
-                        cursorPos = rd.clusterByteIndices[nearestCluster];
+                        {
+                            int off = get_cluster_byte_offset(&rd, editorText, nearestCluster);
+                            if (off >= 0)
+                                cursorPos = off;
+                        }
                         status_bar.needs_update = true;
                     }
                 } else if (event.type == SDL_MOUSEBUTTONUP &&
                            event.button.button == SDL_BUTTON_LEFT) {
                     mouseSelecting = 0;
                     if (selectionStart >= 0) {
-                        selectionEnd = get_cluster_index_at_cursor(
-                            editorText, cursorPos, rd.clusterByteIndices, rd.numClusters);
+                        selectionEnd = get_cluster_index_at_cursor(editorText, cursorPos, &rd);
                     }
                 }
             } // End event poll
@@ -1398,6 +1564,12 @@ void display_text_window(const char *font_path, int font_size)
                 state.needs_update = false;
             }
 
+            // If in lazy mode, prepare an on-demand viewport texture
+            if (rd.lazy_mode) {
+                prepare_visible_texture(renderer, font, editorText, text_area_x, text_area_y,
+                                        maxTextWidth, &rd, rd.scrollY, text_area_height);
+            }
+
             // Update status bar
             update_status_bar(&status_bar, renderer, &document, &search, cursorPos, editorText,
                               windowWidth);
@@ -1415,12 +1587,33 @@ void display_text_window(const char *font_path, int font_size)
             SDL_SetRenderDrawColor(renderer, 22, 24, 32, 255);
             SDL_RenderClear(renderer);
 
+            // Compute cursor line to keep it visible in regular mode
+            int cursor_font_height = TTF_FontLineSkip(font);
+            int cursor_line = 0;
+            int line_start_pos = 0;
+            for (int i = 0; i < cursorPos && editorText[i]; i++) {
+                if (editorText[i] == '\n') {
+                    cursor_line++;
+                    line_start_pos = i + 1;
+                }
+            }
+
+            // Ensure scrollY is within valid bounds for regular mode as well
+            if (rd.scrollY < 0)
+                rd.scrollY = 0;
+            if (rd.textH > 0 && rd.scrollY > rd.textH - text_area_height)
+                rd.scrollY = rd.textH - text_area_height;
+
+            // Leave scrollY controlled by user (mouse wheel, PageUp/PageDown, etc.)
+            // Only ensure scrollY stays within bounds (clamping already done above).
+
             // Render text using floating-point positioning for macOS-like precision
             if (rd.textTexture && rd.textRect.w > 0 && rd.textRect.h > 0 && rd.textRect.x >= 0 &&
                 rd.textRect.y >= 0) {
-                SDL_FRect textRectF = {(float) rd.textRect.x, (float) rd.textRect.y,
-                                       (float) rd.textRect.w, (float) rd.textRect.h};
-                SDL_RenderCopyF(renderer, rd.textTexture, NULL, &textRectF);
+                SDL_Rect src = {0, rd.scrollY, rd.textRect.w, text_area_height};
+                SDL_FRect dst = {(float) rd.textRect.x, (float) rd.textRect.y,
+                                 (float) rd.textRect.w, (float) text_area_height};
+                SDL_RenderCopyF(renderer, rd.textTexture, &src, &dst);
             }
 
             // Render selection highlight
@@ -1443,8 +1636,7 @@ void display_text_window(const char *font_path, int font_size)
                 SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
                 for (int i = 0; i < search.num_matches; i++) {
                     int match_pos = search.match_positions[i];
-                    int cluster_idx = get_cluster_index_at_cursor(
-                        editorText, match_pos, rd.clusterByteIndices, rd.numClusters);
+                    int cluster_idx = get_cluster_index_at_cursor(editorText, match_pos, &rd);
 
                     if (cluster_idx < rd.numClusters) {
                         SDL_Rect search_hl = {rd.textRect.x + rd.glyphOffsets[cluster_idx],
@@ -1464,19 +1656,7 @@ void display_text_window(const char *font_path, int font_size)
                 }
             }
 
-            // Render cursor
-            int cursor_font_height = TTF_FontLineSkip(font);
-            int cursor_line = 0;
-            int line_start_pos = 0;
-
-            // Find which line the cursor is on and the start position of that line
-            for (int i = 0; i < cursorPos && editorText[i]; i++) {
-                if (editorText[i] == '\n') {
-                    cursor_line++;
-                    line_start_pos = i + 1;
-                }
-            }
-
+            // Render cursor (cursor_line and line_start_pos were computed earlier in this block)
             // Calculate cursor position on the current line
             int cursor_pos_in_line = cursorPos - line_start_pos;
 

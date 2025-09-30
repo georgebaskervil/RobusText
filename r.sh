@@ -1,3 +1,3 @@
 make clean
-make
-./main
+make -j$(nproc)
+./RobusText Inter_18pt-Regular.ttf testdata/combining_10k.txt

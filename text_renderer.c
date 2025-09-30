@@ -2,13 +2,328 @@
 #include "debug.h"
 #include <execinfo.h>
 #include <math.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h> // Add this for STDERR_FILENO
 #include <wchar.h>
 
+// Forward declarations for functions defined later in this file
+static int utf8_char_length(const char *s);
+int get_cluster_index_from_array(const char *text, int byte_cursor, const int *clusterByteIndices,
+                                 int numClusters);
+
 // Maximum number of combining marks allowed per base character.
 #define MAX_COMBINING_PER_CLUSTER 5
+// Lazy block size: number of clusters per block for cached cluster byte indices
+#define CLUSTER_BLOCK_SIZE 1024
+// Number of blocks to keep cached at once
+#define CLUSTER_CACHE_BLOCKS 8
+
+// Block cache entry
+typedef struct {
+    int block_index; // which block (0..)
+    int *offsets;    // array of size CLUSTER_BLOCK_SIZE for cluster byte offsets
+    bool valid;
+    uint64_t last_used; // LRU timestamp
+} ClusterBlock;
+
+typedef struct {
+    int block_size;
+    int num_blocks_cached;
+    ClusterBlock *blocks;   // array of size num_blocks_cached
+    uint64_t usage_counter; // monotonic counter for LRU
+} ClusterBlockCache;
+
+// Ensure rd has block cache storage allocated
+static void ensure_block_cache(RenderData *rd)
+{
+    if (!rd)
+        return;
+    if (!rd->cluster_block_cache) {
+        ClusterBlockCache *cache = malloc(sizeof(ClusterBlockCache));
+        cache->block_size =
+            rd->cluster_block_size > 0 ? rd->cluster_block_size : CLUSTER_BLOCK_SIZE;
+        cache->num_blocks_cached =
+            rd->cluster_cache_blocks > 0 ? rd->cluster_cache_blocks : CLUSTER_CACHE_BLOCKS;
+        cache->blocks = calloc(cache->num_blocks_cached, sizeof(ClusterBlock));
+        cache->usage_counter = 1;
+        rd->cluster_block_cache = cache;
+    }
+}
+
+// Find existing block or allocate/evict one using LRU. Returns pointer to block.
+static ClusterBlock *get_or_create_block(ClusterBlockCache *cache, int block_idx, const char *text)
+{
+    if (!cache)
+        return NULL;
+    // Search for existing block
+    for (int i = 0; i < cache->num_blocks_cached; i++) {
+        ClusterBlock *b = &cache->blocks[i];
+        if (b->valid && b->block_index == block_idx) {
+            b->last_used = ++cache->usage_counter;
+            return b;
+        }
+    }
+
+    // Find an unused slot first
+    int lru_index = -1;
+    uint64_t lru_value = (uint64_t) -1;
+    for (int i = 0; i < cache->num_blocks_cached; i++) {
+        ClusterBlock *b = &cache->blocks[i];
+        if (!b->valid) {
+            lru_index = i;
+            break;
+        }
+        if (b->last_used < lru_value) {
+            lru_value = b->last_used;
+            lru_index = i;
+        }
+    }
+
+    if (lru_index < 0)
+        return NULL;
+    ClusterBlock *dest = &cache->blocks[lru_index];
+    // Evict if necessary
+    if (dest->offsets) {
+        free(dest->offsets);
+        dest->offsets = NULL;
+    }
+    dest->offsets = NULL;
+    dest->block_index = block_idx;
+    dest->valid = true;
+    dest->last_used = ++cache->usage_counter;
+    return dest;
+}
+
+// Fetch byte offset for a clusterIndex by computing which block it's in and
+// computing offsets within that block lazily. For simplicity implement a
+// straightforward on-demand scan from start-of-block to fill offsets.
+int get_cluster_byte_offset(RenderData *rd, const char *text, int clusterIndex)
+{
+    if (!rd || !text || clusterIndex < 0)
+        return -1;
+
+    // If the full clusterByteIndices array exists (legacy), use it directly
+    if (rd->clusterByteIndices) {
+        if (clusterIndex < rd->numClusters)
+            return rd->clusterByteIndices[clusterIndex];
+        return -1;
+    }
+
+    // If lazy-mode and a block cache exists, try to use it
+    if (rd->lazy_mode) {
+        ensure_block_cache(rd);
+        ClusterBlockCache *cache = (ClusterBlockCache *) rd->cluster_block_cache;
+        int bs = cache->block_size;
+        int block_idx = clusterIndex / bs;
+        int within = clusterIndex % bs;
+
+        // Find if block is cached
+        for (int i = 0; i < cache->num_blocks_cached; i++) {
+            ClusterBlock *b = &cache->blocks[i];
+            if (b->valid && b->block_index == block_idx) {
+                if (within < bs && b->offsets && b->offsets[within] >= 0)
+                    return b->offsets[within];
+                break;
+            }
+        }
+
+        // Not cached: populate a block (evict oldest)
+        ClusterBlock *dest = get_or_create_block(cache, block_idx, text);
+        if (!dest)
+            return -1;
+        dest->offsets = malloc(bs * sizeof(int));
+        if (!dest->offsets)
+            return -1;
+        for (int k = 0; k < bs; k++)
+            dest->offsets[k] = -1;
+
+        // Scan forward from beginning of block to fill offsets
+        int target_start_cluster = block_idx * bs;
+        int pos = 0;
+        int cidx = 0;
+        // Fast-forward by scanning until target_start_cluster
+        while (text[pos] && cidx < target_start_cluster) {
+            pos += utf8_char_length(text + pos);
+            cidx++;
+        }
+        // Fill offsets for this block
+        for (int k = 0; k < bs; k++) {
+            if (!text[pos]) {
+                dest->offsets[k] = -1;
+            } else {
+                dest->offsets[k] = pos;
+                pos += utf8_char_length(text + pos);
+                cidx++;
+            }
+        }
+
+        // Return requested offset if within block
+        if (within < bs) {
+            int off = dest->offsets[within];
+            if (off >= 0)
+                return off;
+        }
+
+        // As fallback, scan from block end until we reach clusterIndex
+        pos = dest->offsets[bs - 1] >= 0 ? dest->offsets[bs - 1] : pos;
+        int idx = block_idx * bs + bs - 1;
+        while (text[pos] && idx < clusterIndex) {
+            pos += utf8_char_length(text + pos);
+            idx++;
+        }
+        if (idx == clusterIndex)
+            return pos;
+        return -1;
+    }
+
+    // Fallback: if no clusters known (shouldn't happen) scan from start
+    int pos = 0;
+    int idx = 0;
+    while (text[pos] && idx <= clusterIndex) {
+        if (idx == clusterIndex)
+            return pos;
+        int len = utf8_char_length(text + pos);
+        pos += len;
+        idx++;
+    }
+    if (idx == clusterIndex)
+        return pos;
+    return -1;
+}
+
+// Invalidate cached blocks after a given cluster index (used after edits)
+static void invalidate_blocks_after(RenderData *rd, int clusterIndex)
+{
+    if (!rd || !rd->cluster_block_cache)
+        return;
+    ClusterBlockCache *cache = (ClusterBlockCache *) rd->cluster_block_cache;
+    int bs = cache->block_size;
+    int cutoff = clusterIndex / bs;
+    for (int i = 0; i < cache->num_blocks_cached; i++) {
+        ClusterBlock *b = &cache->blocks[i];
+        if (!b->valid)
+            continue;
+        if (b->block_index >= cutoff) {
+            free(b->offsets);
+            b->offsets = NULL;
+            b->valid = false;
+        }
+    }
+}
+
+void invalidate_cluster_blocks_after(RenderData *rd, int clusterIndex)
+{
+    invalidate_blocks_after(rd, clusterIndex);
+}
+
+// Prepare a texture containing only the visible lines (lazy rendering). This
+// renders line-by-line into a surface then converts to a texture.
+int prepare_visible_texture(SDL_Renderer *renderer, TTF_Font *font, const char *utf8_text,
+                            int x_offset, int y_offset, int maxWidth, RenderData *rd, int viewportY,
+                            int viewportHeight)
+{
+    if (!renderer || !font || !utf8_text || !rd)
+        return -1;
+    // Create an empty surface sized to viewportWidth x viewportHeight
+    SDL_Surface *surface = SDL_CreateRGBSurface(0, rd->maxLineWidth ? rd->maxLineWidth : maxWidth,
+                                                viewportHeight, 32, 0, 0, 0, 0);
+    if (!surface)
+        return -1;
+
+    // Clear background
+    SDL_FillRect(surface, NULL, SDL_MapRGB(surface->format, 22, 24, 32));
+
+    // Determine first visible cluster/line from viewportY using lineHeight
+    int line_h = TTF_FontLineSkip(font);
+    int first_line = viewportY / line_h;
+    int last_line = (viewportY + viewportHeight) / line_h + 1;
+
+    // Scan text to render lines in [first_line, last_line]
+    int cur_line = 0;
+    int pos = 0;
+    int text_len = strlen(utf8_text);
+    while (pos < text_len && cur_line <= last_line) {
+        // Extract next logical line (until \n or end)
+        int line_start = pos;
+        while (pos < text_len && utf8_text[pos] != '\n')
+            pos++;
+        int line_end = pos; // points at '\n' or end
+
+        if (cur_line >= first_line && cur_line <= last_line) {
+            int chunk_len = line_end - line_start;
+            char *linebuf = malloc(chunk_len + 1);
+            if (linebuf) {
+                memcpy(linebuf, utf8_text + line_start, chunk_len);
+                linebuf[chunk_len] = '\0';
+
+                SDL_Color textColor = {198, 194, 199, 255};
+                SDL_Surface *textSurf =
+                    TTF_RenderUTF8_Blended_Wrapped(font, linebuf, textColor, maxWidth);
+                if (textSurf) {
+                    SDL_Rect dst = {0, (cur_line - first_line) * line_h, textSurf->w, textSurf->h};
+                    SDL_BlitSurface(textSurf, NULL, surface, &dst);
+                    SDL_FreeSurface(textSurf);
+                }
+                free(linebuf);
+            }
+        }
+
+        if (pos < text_len && utf8_text[pos] == '\n')
+            pos++;
+        cur_line++;
+    }
+
+    // Create texture from surface and store in rd
+    if (rd->textTexture) {
+        SDL_DestroyTexture(rd->textTexture);
+        rd->textTexture = NULL;
+    }
+    rd->textTexture = SDL_CreateTextureFromSurface(renderer, surface);
+    if (!rd->textTexture) {
+        SDL_FreeSurface(surface);
+        return -1;
+    }
+    // Update rd->textRect to describe viewport-sized texture
+    rd->textRect.x = x_offset;
+    rd->textRect.y = y_offset;
+    rd->textRect.w = surface->w;
+    rd->textRect.h = surface->h;
+
+    SDL_FreeSurface(surface);
+    return 0;
+}
+
+// New cluster index accessor that uses RenderData (placeholder lazy behavior).
+int get_cluster_index_at_cursor(const char *text, int byte_cursor, RenderData *rd)
+{
+    // If legacy full index exists, use old behavior
+    if (rd && rd->clusterByteIndices) {
+        return get_cluster_index_from_array(text, byte_cursor, rd->clusterByteIndices,
+                                            rd->numClusters);
+    }
+
+    // Otherwise fallback to scanning — but do not allocate large arrays here
+    if (!text)
+        return 0;
+    if (byte_cursor > 0 && (size_t) byte_cursor == strlen(text)) {
+        return rd ? rd->numClusters : 0;
+    }
+
+    int pos = 0;
+    int cluster = 0;
+    while (text[pos]) {
+        int next = pos + utf8_char_length(text + pos);
+        if (byte_cursor >= pos && byte_cursor < next)
+            return cluster;
+        pos = next;
+        cluster++;
+    }
+
+    // Cursor at end
+    return cluster;
+}
 
 // Helper: determine the byte length of next UTF-8 character.
 static int utf8_char_length(const char *s)
@@ -48,8 +363,8 @@ int get_glyph_index_at_cursor(const char *text, int byte_cursor)
     return idx;
 }
 
-int get_cluster_index_at_cursor(const char *text, int byte_cursor, const int *clusterByteIndices,
-                                int numClusters)
+int get_cluster_index_from_array(const char *text, int byte_cursor, const int *clusterByteIndices,
+                                 int numClusters)
 {
     // Handle empty text or invalid input
     if (!text || numClusters == 0) {
@@ -191,6 +506,32 @@ int update_render_data(SDL_Renderer *renderer, TTF_Font *font, const char *utf8_
     rd->textRect.y = y_offset;
     rd->textRect.w = textSurface->w;
     rd->textRect.h = textSurface->h;
+    // Initialize scroll position to top when layout changes
+    rd->scrollY = 0;
+    // Heuristic: enable lazy mode if surface or text is very large
+    rd->lazy_mode = 0;
+    rd->cluster_block_size = CLUSTER_BLOCK_SIZE;
+    rd->cluster_cache_blocks = CLUSTER_CACHE_BLOCKS;
+    if (rd->textH > 16384 || strlen(utf8_text) > 100000) {
+        rd->lazy_mode = 1;
+        // Free full arrays to avoid huge memory usage; cache will be used lazily
+        if (rd->clusterByteIndices) {
+            free(rd->clusterByteIndices);
+            rd->clusterByteIndices = NULL;
+        }
+        if (rd->glyphOffsets) {
+            free(rd->glyphOffsets);
+            rd->glyphOffsets = NULL;
+        }
+        if (rd->glyphRects) {
+            free(rd->glyphRects);
+            rd->glyphRects = NULL;
+        }
+        if (rd->clusterRects) {
+            free(rd->clusterRects);
+            rd->clusterRects = NULL;
+        }
+    }
     debug_print(L"[UPDATE %d] Updated textRect to (%d, %d, %d, %d)\n", update_count, rd->textRect.x,
                 rd->textRect.y, rd->textRect.w, rd->textRect.h);
 
@@ -199,7 +540,7 @@ int update_render_data(SDL_Renderer *renderer, TTF_Font *font, const char *utf8_
     // Debug: log that we are about to compute glyph metrics.
     debug_print(L"[UPDATE %d] Starting layout computations...\n", update_count);
 
-    // Compute glyph and cluster layout
+    // Compute glyph and cluster layout (legacy/full mode only)
     int utf8_len = strlen(utf8_text);
 
     // Count UTF-8 characters first
@@ -211,9 +552,19 @@ int update_render_data(SDL_Renderer *renderer, TTF_Font *font, const char *utf8_
         char_count++;
     }
 
-    // Allocate arrays for glyph and cluster data
-    rd->numGlyphs = char_count;
-    rd->numClusters = char_count; // For simplicity, each character is its own cluster
+    // If lazy_mode is enabled, avoid allocating large arrays and avoid creating
+    // a full texture. We will render only visible portions on demand.
+    if (rd->lazy_mode) {
+        rd->numGlyphs = char_count;
+        rd->numClusters = char_count;
+        // Free the big surface to avoid memory blowup
+        SDL_FreeSurface(textSurface);
+        // Ensure block cache exists (lazy allocations will populate on demand)
+        ensure_block_cache(rd);
+        debug_print(L"[UPDATE %d] Lazy mode enabled - skipping full layout (chars=%d)\n",
+                    update_count, char_count);
+        return 0;
+    }
 
     // Free old allocations if they exist
     if (rd->textTexture) {
@@ -354,4 +705,18 @@ void cleanup_render_data(RenderData *rd)
     }
     rd->numGlyphs = 0;
     rd->numClusters = 0;
+
+    // Free cluster block cache if present
+    if (rd->cluster_block_cache) {
+        ClusterBlockCache *cache = (ClusterBlockCache *) rd->cluster_block_cache;
+        if (cache->blocks) {
+            for (int i = 0; i < cache->num_blocks_cached; i++) {
+                if (cache->blocks[i].offsets)
+                    free(cache->blocks[i].offsets);
+            }
+            free(cache->blocks);
+        }
+        free(cache);
+        rd->cluster_block_cache = NULL;
+    }
 }
