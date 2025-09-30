@@ -106,3 +106,34 @@ ensure-mimalloc:
 # installs into the in-tree `third_party/mimalloc/install` prefix.
 mimalloc:
 	@./scripts/build_mimalloc.sh
+
+.PHONY: wasm
+wasm:
+	@echo "Building WebAssembly (WASM) with Emscripten..."
+	@if ! command -v emcc >/dev/null 2>&1; then \
+		echo "emcc not found in PATH. Install Emscripten and ensure emcc is available."; exit 1; \
+	fi
+	# create output dir
+	mkdir -p build/wasm
+	# emcc flags: enable SDL2/TTF support, allow memory growth for safety, preload assets
+	EMFLAGS="-O2 -s WASM=1 -s USE_SDL=2 -s USE_SDL_TTF=2 -s USE_FREETYPE=1 -s USE_LIBPNG=1 -s ALLOW_MEMORY_GROWTH=1 -s ASSERTIONS=1 -s EXIT_RUNTIME=1"
+	# For wasm builds we must NOT force-include mimalloc; build without mimalloc glue
+	# Provide a conservative set of CFLAGS for emscripten
+	EMCFLAGS="-O2 -g0 -Wall -Wextra -I. -D__EMSCRIPTEN__ -DUSE_SDL=2 -DUSE_SDL_TTF=2 -DUSE_FREETYPE=1"
+		# Include emscripten_config.h to ensure macros are available early
+		EMCFLAGS="-O2 -g0 -Wall -Wextra -I. -D__EMSCRIPTEN__ -DUSE_SDL=2 -DUSE_SDL_TTF=2 -DUSE_FREETYPE=1 -include emscripten_config.h"
+
+	# Avoid pulling native SDL headers via CFLAGS in the environment; clear CFLAGS/LDFLAGS
+	CFLAGS="$$EMCFLAGS"
+	LDFLAGS=
+	# Source files (space-separated) - expand Makefile variable into a shell variable
+	SRCS="$(SOURCES)"
+	# Preload assets (font and testdata directory)
+	PRELOAD="--preload-file Inter_18pt-Regular.ttf --preload-file testdata@/testdata"
+	# Build using emcc
+	emcc $$EMCFLAGS $$EMFLAGS $$PRELOAD -o build/wasm/RobusText.html main.c debug.c unicode_processor.c sdl_window.c \
+		text_renderer.c file_operations.c undo_system.c search_system.c status_bar.c line_numbers.c auto_save.c dialog.c
+	# Copy assets
+	# assets are preloaded by emcc; still copy README or extras if desired
+	@echo "WASM build complete: open build/wasm/RobusText.html in a browser (use a local server)"
+	@echo "WASM build complete: open build/wasm/RobusText.html in a browser"

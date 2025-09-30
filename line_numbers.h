@@ -1,6 +1,7 @@
 #ifndef LINE_NUMBERS_H
 #define LINE_NUMBERS_H
 
+#include "platform_sdl.h"
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include <stdbool.h>

@@ -1,6 +1,7 @@
 #ifndef TEXT_RENDERER_H
 #define TEXT_RENDERER_H
 
+#include "platform_sdl.h"
 #include <SDL.h>
 #include <SDL_ttf.h>
 

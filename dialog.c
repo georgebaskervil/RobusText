@@ -1,5 +1,7 @@
 #include "dialog.h"
 #include "debug.h"
+#include <SDL.h>
+#include <SDL_ttf.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>

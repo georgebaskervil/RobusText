@@ -2,6 +2,7 @@
 #define STATUS_BAR_H
 
 #include "file_operations.h"
+#include "platform_sdl.h"
 #include "search_system.h"
 #include <SDL.h>
 #include <SDL_ttf.h>

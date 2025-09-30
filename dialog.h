@@ -1,6 +1,7 @@
 #ifndef DIALOG_H
 #define DIALOG_H
 
+#include "platform_sdl.h"
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include <stdbool.h>

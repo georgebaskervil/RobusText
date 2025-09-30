@@ -72,9 +72,55 @@ typedef struct {
 } RenderContext;
 
 static RenderContext g_render_context = {0};
+/* Flag to indicate the render context is ready for the emscripten callback. */
+static volatile int g_emscripten_ready = 0;
 
 // Forward declarations
 static void render_frame(RenderContext *ctx);
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+
+// Minimal Emscripten main loop callback: poll events and render one frame.
+static void emscripten_frame_callback(void *arg)
+{
+    if (!g_emscripten_ready)
+        return;
+    RenderContext *ctx = (RenderContext *) arg;
+    SDL_Event event;
+
+    debug_print(L"[EMSCRIPTEN] frame callback invoked\n");
+    /* Also print a narrow string which reliably appears in browser console
+       even if wide-char debug_print is quiet. */
+#ifdef __EMSCRIPTEN__
+    printf("[EMSCRIPTEN] frame callback invoked\n");
+#endif
+
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
+            if (ctx->document && ctx->document->is_modified) {
+                debug_print(L"Warning: Closing with unsaved changes\n");
+            }
+            *ctx->running = false;
+            emscripten_cancel_main_loop();
+            return;
+        }
+
+        if (event.type == SDL_WINDOWEVENT && (event.window.event == SDL_WINDOWEVENT_RESIZED ||
+                                              event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)) {
+            int new_w = event.window.data1;
+            int new_h = event.window.data2;
+            if (ctx->windowWidth)
+                *ctx->windowWidth = new_w;
+            if (ctx->windowHeight)
+                *ctx->windowHeight = new_h;
+            SDL_SetTextInputRect(&(SDL_Rect){0, 0, new_w, new_h});
+        }
+    }
+
+    render_frame(ctx);
+}
+#endif
 
 // Event queue functions
 static void init_event_queue(EventQueue *queue)
@@ -228,6 +274,10 @@ static void *render_thread_func(void *arg)
 // Render a single frame
 static void render_frame(RenderContext *ctx)
 {
+#ifdef __EMSCRIPTEN__
+    EM_ASM({ console.log('[EMSCRIPTEN] render_frame start'); });
+    printf("[EMSCRIPTEN] render_frame start\n");
+#endif
     SDL_Renderer *renderer = ctx->renderer;
     TTF_Font *font = ctx->font;
     RenderData *rd = ctx->rd;
@@ -259,9 +309,17 @@ static void render_frame(RenderContext *ctx)
 
     if (content_changed || layout_changed || cursor_changed || selection_changed ||
         ctx->status_bar->needs_update || needs_update) {
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ console.log('[EMSCRIPTEN] about to update_render_data'); });
+        printf("[EMSCRIPTEN] about to update_render_data\n");
+#endif
         if (content_changed || layout_changed) {
             update_render_data(renderer, font, editorText, *ctx->text_area_x, *ctx->text_area_y,
                                *ctx->maxTextWidth, rd);
+#ifdef __EMSCRIPTEN__
+            EM_ASM({ console.log('[EMSCRIPTEN] update_render_data returned'); });
+            printf("[EMSCRIPTEN] update_render_data returned\n");
+#endif
             if (rd->lazy_mode) {
                 prepare_visible_texture(renderer, font, editorText, *ctx->text_area_x,
                                         *ctx->text_area_y, *ctx->maxTextWidth, rd, rd->scrollY,
@@ -290,6 +348,10 @@ static void render_frame(RenderContext *ctx)
     ctx->line_numbers->rect.y = 0;
 
     // Clear screen
+#ifdef __EMSCRIPTEN__
+    EM_ASM({ console.log('[EMSCRIPTEN] clearing screen'); });
+    printf("[EMSCRIPTEN] clearing screen\n");
+#endif
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderDrawColor(renderer, 22, 24, 32, 255);
     SDL_RenderClear(renderer);
@@ -327,8 +389,12 @@ static void render_frame(RenderContext *ctx)
     }
 
     // Render text using floating-point positioning for macOS-like precision
-    if (rd->textTexture && rd->textRect.w > 0 && rd->textRect.h > 0 && rd->textRect.x >= 0 &&
+    if (rd && rd->textTexture && rd->textRect.w > 0 && rd->textRect.h > 0 && rd->textRect.x >= 0 &&
         rd->textRect.y >= 0) {
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ console.log('[EMSCRIPTEN] about to render texture'); });
+        printf("[EMSCRIPTEN] about to render texture\n");
+#endif
         // Source rect selects the visible portion of the texture based on scrollY
         SDL_Rect src = {0, rd->scrollY, rd->textRect.w, *ctx->text_area_height};
         SDL_FRect dst = {(float) rd->textRect.x, (float) rd->textRect.y, (float) rd->textRect.w,
@@ -338,12 +404,25 @@ static void render_frame(RenderContext *ctx)
 
     // Render selection highlight
     if (selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd) {
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ console.log('[EMSCRIPTEN] rendering selection start=%d end=%d', $0, $1); },
+               selectionStart, selectionEnd);
+        printf("[EMSCRIPTEN] rendering selection start=%d end=%d\n", selectionStart, selectionEnd);
+#endif
         int startIdx = selectionStart < selectionEnd ? selectionStart : selectionEnd;
         int endIdx = selectionStart < selectionEnd ? selectionEnd : selectionStart;
         if (startIdx < rd->numClusters && endIdx < rd->numClusters) {
-            SDL_Rect hl = {rd->textRect.x + rd->glyphOffsets[startIdx], rd->textRect.y,
-                           rd->glyphOffsets[endIdx] - rd->glyphOffsets[startIdx] +
-                               rd->clusterRects[endIdx].w,
+            int start_x = 0, end_x = 0;
+            if (rd->glyphOffsets && startIdx < rd->numGlyphs)
+                start_x = rd->glyphOffsets[startIdx];
+            else if (rd->clusterRects)
+                start_x = rd->clusterRects[startIdx].x;
+            if (rd->glyphOffsets && endIdx < rd->numGlyphs)
+                end_x = rd->glyphOffsets[endIdx];
+            else if (rd->clusterRects)
+                end_x = rd->clusterRects[endIdx].x + rd->clusterRects[endIdx].w;
+
+            SDL_Rect hl = {rd->textRect.x + start_x, rd->textRect.y, end_x - start_x,
                            rd->textRect.h};
             SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
             SDL_SetRenderDrawColor(renderer, 200, 200, 180, 128);
@@ -555,10 +634,29 @@ static char *simple_file_picker(bool is_save)
 void display_text_window(const char *font_path, int font_size, const char *initial_file)
 {
     debug_print(L"Entering display_text_window\n");
+#ifdef __EMSCRIPTEN__
+    EM_ASM({ console.log('[EMSCRIPTEN] display_text_window() entry'); });
+#endif
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { /* error handling */
         return;
     }
+#ifdef __EMSCRIPTEN__
+    {
+        int sdl_init_ret = 0; /* SDL_Init already called - assume success path */
+        EM_ASM({ console.log('[EMSCRIPTEN] SDL_Init returned (assumed 0)'); });
+        printf("[EMSCRIPTEN] SDL_Init called\n");
+        fflush(stdout);
+    }
+#endif
+
+#ifdef __EMSCRIPTEN__
+    /* Register a safe stub main loop early so that runtime calls like
+       eglSwapInterval/_emscripten_set_main_loop_timing (invoked by SDL
+       during renderer/window setup) do not fail. The callback is guarded
+       by g_emscripten_ready and will return until the context is ready. */
+    emscripten_set_main_loop_arg(emscripten_frame_callback, &g_render_context, 0, 0);
+#endif
 
     // Enable macOS-like text rendering with stem darkening
     setenv("FREETYPE_PROPERTIES", "autofitter:no-stem-darkening=0 cff:no-stem-darkening=0", 1);
@@ -567,6 +665,9 @@ void display_text_window(const char *font_path, int font_size, const char *initi
         SDL_Quit();
         return;
     }
+#ifdef __EMSCRIPTEN__
+    EM_ASM({ console.log('[EMSCRIPTEN] TTF_Init completed'); });
+#endif
 
     SDL_Window *window =
         SDL_CreateWindow("RobusText Editor", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 900,
@@ -578,6 +679,9 @@ void display_text_window(const char *font_path, int font_size, const char *initi
         SDL_Quit();
         return;
     }
+#ifdef __EMSCRIPTEN__
+    EM_ASM({ console.log('[EMSCRIPTEN] SDL_CreateWindow succeeded'); });
+#endif
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer) { /* error handling */
         SDL_DestroyWindow(window);
@@ -585,11 +689,23 @@ void display_text_window(const char *font_path, int font_size, const char *initi
         SDL_Quit();
         return;
     }
+#ifdef __EMSCRIPTEN__
+    EM_ASM({ console.log('[EMSCRIPTEN] SDL_CreateRenderer succeeded'); });
+#endif
     // Set logical rendering size to window dimensions to handle high-DPI scaling
     SDL_RenderSetLogicalSize(renderer, 900, 700);
 
     TTF_Font *font = TTF_OpenFont(font_path, font_size);
     TTF_Font *status_font = TTF_OpenFont(font_path, font_size - 4); // Smaller font for status
+    if (!font || !status_font) {
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ console.log('[EMSCRIPTEN] Failed to open fonts'); });
+#endif
+    } else {
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ console.log('[EMSCRIPTEN] Fonts loaded'); });
+#endif
+    }
     if (!font || !status_font) {
         debug_print(L"[ERROR] Failed to open font: %hs\n", TTF_GetError());
         if (font)
@@ -709,6 +825,119 @@ void display_text_window(const char *font_path, int font_size, const char *initi
     init_event_queue(&g_event_queue);
 
     // Set up render context with all necessary pointers
+#ifdef __EMSCRIPTEN__
+    /* Allocate a single heap container for all state the emscripten callback
+       will need after this function returns. This avoids multiple separate
+       mallocs and reduces the chance of some pointers being NULL. */
+    struct EmsHeap {
+        RenderData rd;
+        DocumentState document;
+        UndoSystem undo;
+        SearchState search;
+        StatusBar status_bar;
+        LineNumbers line_numbers;
+        AutoSave auto_save;
+        char *editorText;
+        int cursorPos;
+        int selectionStart;
+        int selectionEnd;
+        int windowWidth;
+        int windowHeight;
+        bool running;
+        int search_buffer_pos;
+        int mouseSelecting;
+        int maxTextWidth;
+        int text_area_height;
+        int text_area_x;
+        int text_area_y;
+        char search_buffer[256];
+    } *heap = malloc(sizeof(struct EmsHeap));
+
+    if (heap) {
+        /* Copy locals into the heap container (shallow copies where appropriate). */
+        *heap = (struct EmsHeap){0};
+        heap->rd = rd;
+        heap->document = document;
+        heap->undo = undo;
+        heap->search = search;
+        heap->status_bar = status_bar;
+        heap->line_numbers = line_numbers;
+        heap->auto_save = auto_save;
+        heap->editorText = editorText;
+        heap->cursorPos = cursorPos;
+        heap->selectionStart = selectionStart;
+        heap->selectionEnd = selectionEnd;
+        heap->windowWidth = windowWidth;
+        heap->windowHeight = windowHeight;
+        heap->running = running;
+        heap->search_buffer_pos = search_buffer_pos;
+        heap->mouseSelecting = mouseSelecting;
+        heap->maxTextWidth = maxTextWidth;
+        heap->text_area_height = text_area_height;
+        heap->text_area_x = text_area_x;
+        heap->text_area_y = text_area_y;
+        memcpy(heap->search_buffer, search_buffer, sizeof(heap->search_buffer));
+
+        g_render_context.renderer = renderer;
+        g_render_context.font = font;
+        g_render_context.status_font = status_font;
+        g_render_context.window = window;
+        g_render_context.editorText = &heap->editorText;
+        g_render_context.cursorPos = &heap->cursorPos;
+        g_render_context.selectionStart = &heap->selectionStart;
+        g_render_context.selectionEnd = &heap->selectionEnd;
+        g_render_context.windowWidth = &heap->windowWidth;
+        g_render_context.windowHeight = &heap->windowHeight;
+        g_render_context.running = &heap->running;
+        g_render_context.document = &heap->document;
+        g_render_context.undo = &heap->undo;
+        g_render_context.search = &heap->search;
+        g_render_context.status_bar = &heap->status_bar;
+        g_render_context.line_numbers = &heap->line_numbers;
+        g_render_context.auto_save = &heap->auto_save;
+        g_render_context.rd = &heap->rd;
+        g_render_context.search_mode = &search_mode; /* small transient flag ok */
+        g_render_context.search_buffer = heap->search_buffer;
+        g_render_context.search_buffer_pos = &heap->search_buffer_pos;
+        g_render_context.mouseSelecting = &heap->mouseSelecting;
+        g_render_context.margin = margin;
+        g_render_context.maxTextWidth = &heap->maxTextWidth;
+        g_render_context.text_area_height = &heap->text_area_height;
+        g_render_context.text_area_x = &heap->text_area_x;
+        g_render_context.text_area_y = &heap->text_area_y;
+    } else {
+        /* Allocation failed; fall back to using locals (will likely be invalid
+           after return) but proceed to avoid blocking — worst case the app
+           aborts and we can diagnose. */
+        g_render_context.renderer = renderer;
+        g_render_context.font = font;
+        g_render_context.status_font = status_font;
+        g_render_context.window = window;
+        g_render_context.editorText = &editorText;
+        g_render_context.cursorPos = &cursorPos;
+        g_render_context.selectionStart = &selectionStart;
+        g_render_context.selectionEnd = &selectionEnd;
+        g_render_context.windowWidth = &windowWidth;
+        g_render_context.windowHeight = &windowHeight;
+        g_render_context.running = &running;
+        g_render_context.document = &document;
+        g_render_context.undo = &undo;
+        g_render_context.search = &search;
+        g_render_context.status_bar = &status_bar;
+        g_render_context.line_numbers = &line_numbers;
+        g_render_context.auto_save = &auto_save;
+        g_render_context.rd = &rd;
+        g_render_context.search_mode = &search_mode;
+        g_render_context.search_buffer = search_buffer;
+        g_render_context.search_buffer_pos = &search_buffer_pos;
+        g_render_context.mouseSelecting = &mouseSelecting;
+        g_render_context.margin = margin;
+        g_render_context.maxTextWidth = &maxTextWidth;
+        g_render_context.text_area_height = &text_area_height;
+        g_render_context.text_area_x = &text_area_x;
+        g_render_context.text_area_y = &text_area_y;
+    }
+#else
     g_render_context.renderer = renderer;
     g_render_context.font = font;
     g_render_context.status_font = status_font;
@@ -736,8 +965,24 @@ void display_text_window(const char *font_path, int font_size, const char *initi
     g_render_context.text_area_height = &text_area_height;
     g_render_context.text_area_x = &text_area_x;
     g_render_context.text_area_y = &text_area_y;
+#endif
 
-    // Start render thread
+#ifdef __EMSCRIPTEN__
+    /* Mark the render context ready so the previously-registered
+       emscripten_frame_callback will begin to run. The actual main loop
+       was registered early after SDL_Init to satisfy runtime timing
+       calls; do not re-register here (that causes an assertion). */
+    g_emscripten_ready = 1;
+    debug_print(L"[EMSCRIPTEN] g_emscripten_ready set -> callback will run\n");
+#ifdef __EMSCRIPTEN__
+    printf("[EMSCRIPTEN] g_emscripten_ready set -> callback will run\n");
+#endif
+#endif
+
+    // Start render thread (native only). Under Emscripten the browser-driven
+    // main loop will handle rendering so we must not create threads or enter
+    // the blocking while loop below.
+#ifndef __EMSCRIPTEN__
     g_continuous_resize_active = true;
     if (pthread_create(&g_render_thread, NULL, render_thread_func, &g_render_context) != 0) {
         debug_print(L"Failed to create render thread\n");
@@ -747,9 +992,23 @@ void display_text_window(const char *font_path, int font_size, const char *initi
         SDL_AddEventWatch(event_watch_callback, NULL);
         debug_print(L"Continuous resize system initialized\n");
     }
+#else
+    g_continuous_resize_active = false;
+#endif
 
     // If continuous resize failed, fall back to regular mode
     bool use_continuous_resize = g_continuous_resize_active;
+
+#ifdef __EMSCRIPTEN__
+    /* Under Emscripten we must not block the main thread. The emscripten
+       main loop was registered earlier and will drive rendering and event
+       polling. Return now so the browser can schedule the callback. */
+    debug_print(L"[EMSCRIPTEN] returning from display_text_window to browser main loop\n");
+#ifdef __EMSCRIPTEN__
+    printf("[EMSCRIPTEN] returning from display_text_window to browser main loop\n");
+#endif
+    return;
+#endif
 
     while (running) {
         uint32_t frame_start = SDL_GetTicks();
@@ -1490,13 +1749,21 @@ void display_text_window(const char *font_path, int font_size, const char *initi
                         int minDist = INT_MAX;
                         if (rd.numClusters > 0) {
                             for (int i = 0; i < rd.numClusters; i++) {
-                                if (i < rd.numGlyphs) {
-                                    int clusterX = rd.glyphOffsets[i];
-                                    int dist = abs(clusterX - relativeX);
-                                    if (dist < minDist) {
-                                        minDist = dist;
-                                        nearestCluster = i;
-                                    }
+                                int clusterX = 0;
+                                bool havePos = false;
+                                if (rd.glyphOffsets && i < rd.numGlyphs) {
+                                    clusterX = rd.glyphOffsets[i];
+                                    havePos = true;
+                                } else if (rd.clusterRects) {
+                                    clusterX = rd.clusterRects[i].x;
+                                    havePos = true;
+                                }
+                                if (!havePos)
+                                    continue;
+                                int dist = abs(clusterX - relativeX);
+                                if (dist < minDist) {
+                                    minDist = dist;
+                                    nearestCluster = i;
                                 }
                             }
                             selectionStart = nearestCluster;
@@ -1515,7 +1782,17 @@ void display_text_window(const char *font_path, int font_size, const char *initi
                         int nearestCluster = 0;
                         int minDist = INT_MAX;
                         for (int i = 0; i < rd.numClusters; i++) {
-                            int clusterX = rd.glyphOffsets[i];
+                            int clusterX = 0;
+                            bool havePos = false;
+                            if (rd.glyphOffsets && i < rd.numGlyphs) {
+                                clusterX = rd.glyphOffsets[i];
+                                havePos = true;
+                            } else if (rd.clusterRects) {
+                                clusterX = rd.clusterRects[i].x;
+                                havePos = true;
+                            }
+                            if (!havePos)
+                                continue;
                             int dist = abs(clusterX - relativeX);
                             if (dist < minDist) {
                                 minDist = dist;

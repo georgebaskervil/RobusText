@@ -1,6 +1,7 @@
 #include "auto_save.h"
 #include "debug.h"
 #include <SDL.h>
+#include <stdint.h>
 
 #define DEFAULT_AUTO_SAVE_INTERVAL 60000 // 60 seconds
 

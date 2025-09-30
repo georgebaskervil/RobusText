@@ -1,0 +1,44 @@
+CC := emcc
+TARGET_DIR := build/wasm
+TARGET_HTML := $(TARGET_DIR)/RobusText.html
+
+SOURCES := main.c debug.c unicode_processor.c sdl_window.c text_renderer.c \
+           file_operations.c undo_system.c search_system.c status_bar.c line_numbers.c auto_save.c dialog.c
+
+EMCFLAGS := -O2 -g0 -Wall -Wextra -I.
+EMFLAGS := -s WASM=1 -s USE_SDL=2 -s USE_SDL_TTF=2 -s USE_FREETYPE=1 -s USE_LIBPNG=1 \
+          -s ALLOW_MEMORY_GROWTH=1 -s ASSERTIONS=1 -s EXIT_RUNTIME=1
+
+DEBUG_EMCFLAGS := -O0 -gsource-map -Wall -Wextra -I.
+DEBUG_EMFLAGS := -s WASM=1 -s USE_SDL=2 -s USE_SDL_TTF=2 -s USE_FREETYPE=1 -s USE_LIBPNG=1 \
+			   -s ALLOW_MEMORY_GROWTH=1 -sSAFE_HEAP=1 -s ASSERTIONS=1 -s EXIT_RUNTIME=1
+
+PRELOAD := --preload-file Inter_18pt-Regular.ttf --preload-file testdata@/testdata
+
+.PHONY: all clean
+
+.PHONY: debug
+
+all: $(TARGET_HTML)
+
+$(TARGET_HTML): $(SOURCES)
+	@echo "Building WebAssembly bundle..."
+	@if ! command -v emcc >/dev/null 2>&1; then \
+		echo "emcc not found. Install emsdk and activate it first."; exit 1; \
+	fi
+	mkdir -p $(TARGET_DIR)
+	$(CC) $(EMCFLAGS) $(EMFLAGS) $(PRELOAD) -o $(TARGET_HTML) $(SOURCES)
+	@echo "WASM build written to $(TARGET_HTML)"
+
+.PHONY: debug
+debug: $(SOURCES)
+	@echo "Building DEBUG WebAssembly bundle (SAFE_HEAP)..."
+	@if ! command -v emcc >/dev/null 2>&1; then \
+		echo "emcc not found. Install emsdk and activate it first."; exit 1; \
+	fi
+	mkdir -p $(TARGET_DIR)
+	$(CC) $(DEBUG_EMCFLAGS) $(DEBUG_EMFLAGS) $(PRELOAD) -o $(TARGET_DIR)/RobusText_debug.html $(SOURCES)
+	@echo "DEBUG WASM build written to $(TARGET_DIR)/RobusText_debug.html"
+
+clean:
+	rm -rf $(TARGET_DIR)

@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 // Optional: mimalloc can be used as a drop-in replacement allocator.
 // We'll set mimalloc runtime options here when available to bake-in optimizations.
 #ifdef __has_include
@@ -19,12 +22,19 @@ int main(int argc, char *argv[])
 {
     setlocale(LC_ALL, "");
 
+#ifdef __EMSCRIPTEN__
+    EM_ASM({ console.log('[EMSCRIPTEN] main() start'); });
+#endif
+
     /* If mimalloc is available at build/link time, configure runtime options
         early so they apply before any allocations. These mirror the
         environment-variable equivalents but are embedded in the binary.
         We wrap calls in a runtime check to avoid build failures when the
         header isn't present. */
 #if defined(__has_include) && __has_include(<mimalloc.h>)
+    /* Only configure mimalloc at runtime on native builds; Emscripten
+       builds should not attempt to link or call mimalloc runtime APIs. */
+#ifndef __EMSCRIPTEN__
     /* Enable large OS pages (2/4MiB), eager arena commit, segment cache,
         immediate purge, decommit on purge, reserve huge OS pages, small
         eager commit delay and limit NUMA nodes to 1 for macOS. */
@@ -44,9 +54,8 @@ int main(int argc, char *argv[])
     /* mi_option_set(mi_option_show_stats, 1); */
 #if defined(__APPLE__)
 /* runtime diagnostic: check whether the mimalloc symbol is present in
-   the process. On macOS `dlsym("malloc")` may still point to libc's
-   malloc even when our translation units are redirected to `mi_malloc`.
-   So instead check for the presence of `mi_malloc` directly. */
+   the process. On platforms like Emscripten dlsym isn't available in the
+   same way, so skip this check there. */
 /* delay including dlfcn.h until needed to avoid dependency when mimalloc isn't present */
 #include <dlfcn.h>
     void *mi_malloc_sym = dlsym(RTLD_DEFAULT, "mi_malloc");
@@ -55,6 +64,13 @@ int main(int argc, char *argv[])
     } else {
         fprintf(stderr, "mimalloc symbol NOT found via dlsym\n");
     }
+#endif
+#else
+#ifdef __EMSCRIPTEN__
+    debug_print(L"mimalloc runtime configuration skipped on Emscripten\n");
+#else
+    fprintf(stderr, "mimalloc runtime configuration skipped on Emscripten\n");
+#endif
 #endif
 #endif
 
@@ -74,30 +90,23 @@ int main(int argc, char *argv[])
     }
 
     // Allow optional command-line args: [font_path] [initial_file]
-    const char *font_path = "./SpaceMono-Regular.ttf";
+    const char *font_path = "./Inter_18pt-Regular.ttf";
     const char *initial_file = NULL;
-    // Skip over any flags parsed earlier; find remaining non-flag args
-    int nonflag_idx = 0;
-    for (int i = 1; i < argc; i++) {
+    // Collect up to two non-flag arguments (flags like --debug may appear anywhere)
+    const char *nonflags[2] = {NULL, NULL};
+    int nf = 0;
+    for (int i = 1; i < argc && nf < 2; i++) {
         if (argv[i][0] == '-')
             continue;
-        if (nonflag_idx == 0) {
-            // If there is only one non-flag arg, treat it as initial_file later
-            nonflag_idx = i;
-        } else if (nonflag_idx == 1) {
-            // second non-flag arg
-            nonflag_idx = i;
-        }
+        nonflags[nf++] = argv[i];
     }
-    if (nonflag_idx > 0) {
-        // If there are two non-flag args, the first is font and the second is file
-        // Simpler: if argc >= 3 and argv[1] is not a flag, treat argv[1]=font, argv[2]=file
-        if (argc >= 3 && argv[1][0] != '-') {
-            font_path = argv[1];
-            initial_file = argv[2];
-        } else if (argc >= 2 && argv[1][0] != '-') {
-            initial_file = argv[1];
-        }
+    if (nf == 2) {
+        // first non-flag arg is font, second is initial file
+        font_path = nonflags[0];
+        initial_file = nonflags[1];
+    } else if (nf == 1) {
+        // single non-flag arg -> treat as initial file
+        initial_file = nonflags[0];
     }
 
     display_text_window(font_path, 28, initial_file);

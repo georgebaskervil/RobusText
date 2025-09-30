@@ -1,6 +1,26 @@
 #include "text_renderer.h"
 #include "debug.h"
+#include <SDL.h>
+#include <SDL_ttf.h>
+#ifndef __EMSCRIPTEN__
 #include <execinfo.h>
+#else
+/* Emscripten doesn't provide execinfo.h; provide minimal stubs used by the
+    project so code that calls backtrace/backtrace_symbols still links. These
+    stubs won't produce useful backtraces in wasm, but satisfy compilation. */
+static int backtrace(void **buffer, int size)
+{
+    (void) buffer;
+    (void) size;
+    return 0;
+}
+static char **backtrace_symbols(void *const *buffer, int size)
+{
+    (void) buffer;
+    (void) size;
+    return NULL;
+}
+#endif
 #include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>

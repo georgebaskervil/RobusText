@@ -1,5 +1,7 @@
 #include "status_bar.h"
 #include "debug.h"
+#include <SDL.h>
+#include <SDL_ttf.h>
 #include <stdio.h>
 #include <string.h>
 
