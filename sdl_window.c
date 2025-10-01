@@ -89,12 +89,9 @@ static void emscripten_frame_callback(void *arg)
     RenderContext *ctx = (RenderContext *) arg;
     SDL_Event event;
 
-    debug_print(L"[EMSCRIPTEN] frame callback invoked\n");
-    /* Also print a narrow string which reliably appears in browser console
-       even if wide-char debug_print is quiet. */
-#ifdef __EMSCRIPTEN__
-    printf("[EMSCRIPTEN] frame callback invoked\n");
-#endif
+    /* Removed noisy per-frame logs - uncomment to debug frame callback */
+    // debug_print(L"[EMSCRIPTEN] frame callback invoked\n");
+    // printf("[EMSCRIPTEN] frame callback invoked\n");
 
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_QUIT) {
@@ -115,6 +112,178 @@ static void emscripten_frame_callback(void *arg)
             if (ctx->windowHeight)
                 *ctx->windowHeight = new_h;
             SDL_SetTextInputRect(&(SDL_Rect){0, 0, new_w, new_h});
+        }
+
+        /* Log and HANDLE keyboard events */
+        if (event.type == SDL_TEXTINPUT) {
+            printf("[SDL] TEXTINPUT: %s\n", event.text.text);
+#ifdef __EMSCRIPTEN__
+            EM_ASM({ console.log('[SDL] TEXTINPUT:', UTF8ToString($0)); }, event.text.text);
+            
+            // Actually handle the text input - insert it into the editor
+            if (ctx->editorText && ctx->cursorPos) {
+                char *text = *ctx->editorText;
+                int cursorPos = *ctx->cursorPos;
+                
+                // Record undo action
+                if (ctx->undo) {
+                    record_insert_action(ctx->undo, cursorPos, event.text.text, cursorPos,
+                                       cursorPos + strlen(event.text.text));
+                }
+                
+                // Invalidate cache if using lazy mode
+                if (ctx->rd && ctx->rd->lazy_mode) {
+                    int cluster_at_cursor = get_cluster_index_at_cursor(text, cursorPos, ctx->rd);
+                    invalidate_cluster_blocks_after(ctx->rd, cluster_at_cursor);
+                }
+                
+                // Insert the text
+                int textLen = strlen(text);
+                int insertLen = strlen(event.text.text);
+                char *newText = malloc(textLen + insertLen + 1);
+                if (newText) {
+                    memcpy(newText, text, cursorPos);
+                    memcpy(newText + cursorPos, event.text.text, insertLen);
+                    memcpy(newText + cursorPos + insertLen, text + cursorPos, textLen - cursorPos + 1);
+                    free(text);
+                    *ctx->editorText = newText;
+                    *ctx->cursorPos = cursorPos + insertLen;
+                    
+                    // Mark document as modified
+                    if (ctx->document) {
+                        mark_document_modified(ctx->document, true);
+                    }
+                    
+                    // Update render data to reflect the new text
+                    if (ctx->renderer && ctx->font && ctx->text_area_x && ctx->text_area_y && ctx->maxTextWidth) {
+                        update_render_data(ctx->renderer, ctx->font, *ctx->editorText,
+                                         *ctx->text_area_x, *ctx->text_area_y, *ctx->maxTextWidth, ctx->rd);
+                        if (ctx->rd->lazy_mode && ctx->text_area_height) {
+                            printf("[DEBUG] Calling prepare_visible_texture: text_area_height=%d scrollY=%d\n",
+                                   *ctx->text_area_height, ctx->rd->scrollY);
+                            prepare_visible_texture(ctx->renderer, ctx->font, *ctx->editorText,
+                                                  *ctx->text_area_x, *ctx->text_area_y, *ctx->maxTextWidth,
+                                                  ctx->rd, ctx->rd->scrollY, *ctx->text_area_height);
+                        }
+                    }
+                    
+                    printf("[SDL] Text inserted, new cursor pos: %d\n", *ctx->cursorPos);
+                }
+            }
+#endif
+        } else if (event.type == SDL_KEYDOWN) {
+            printf("[SDL] KEYDOWN: sym=%d scancode=%d\n", event.key.keysym.sym, event.key.keysym.scancode);
+#ifdef __EMSCRIPTEN__
+            EM_ASM({ console.log('[SDL] KEYDOWN: sym=', $0); }, event.key.keysym.sym);
+            
+            // Handle special keys (backspace, arrows, etc.)
+            if (ctx->editorText && ctx->cursorPos) {
+                char *text = *ctx->editorText;
+                int cursorPos = *ctx->cursorPos;
+                int textLen = strlen(text);
+                bool needsUpdate = false;
+                
+                // Backspace
+                if (event.key.keysym.sym == SDLK_BACKSPACE && cursorPos > 0) {
+                    // Record undo
+                    if (ctx->undo) {
+                        char deleted_char[2] = {text[cursorPos - 1], '\0'};
+                        record_delete_action(ctx->undo, cursorPos - 1, deleted_char, cursorPos, cursorPos - 1);
+                    }
+                    
+                    // Delete character before cursor
+                    memmove(text + cursorPos - 1, text + cursorPos, textLen - cursorPos + 1);
+                    *ctx->cursorPos = cursorPos - 1;
+                    needsUpdate = true;
+                    
+                    if (ctx->document) mark_document_modified(ctx->document, true);
+                    printf("[SDL] Backspace: new cursor pos %d\n", *ctx->cursorPos);
+                }
+                // Delete key
+                else if (event.key.keysym.sym == SDLK_DELETE && cursorPos < textLen) {
+                    if (ctx->undo) {
+                        char deleted_char[2] = {text[cursorPos], '\0'};
+                        record_delete_action(ctx->undo, cursorPos, deleted_char, cursorPos, cursorPos);
+                    }
+                    
+                    memmove(text + cursorPos, text + cursorPos + 1, textLen - cursorPos);
+                    needsUpdate = true;
+                    
+                    if (ctx->document) mark_document_modified(ctx->document, true);
+                }
+                // Arrow keys
+                else if (event.key.keysym.sym == SDLK_LEFT && cursorPos > 0) {
+                    *ctx->cursorPos = cursorPos - 1;
+                }
+                else if (event.key.keysym.sym == SDLK_RIGHT && cursorPos < textLen) {
+                    *ctx->cursorPos = cursorPos + 1;
+                }
+                else if (event.key.keysym.sym == SDLK_UP) {
+                    // Find start of current line
+                    int line_start = cursorPos;
+                    while (line_start > 0 && text[line_start - 1] != '\n') line_start--;
+                    
+                    if (line_start > 0) {
+                        // Find start of previous line
+                        int prev_line_start = line_start - 1;
+                        while (prev_line_start > 0 && text[prev_line_start - 1] != '\n') prev_line_start--;
+                        
+                        int col = cursorPos - line_start;
+                        int prev_line_len = line_start - 1 - prev_line_start;
+                        *ctx->cursorPos = prev_line_start + (col < prev_line_len ? col : prev_line_len);
+                    }
+                }
+                else if (event.key.keysym.sym == SDLK_DOWN) {
+                    // Find start and end of current line
+                    int line_start = cursorPos;
+                    while (line_start > 0 && text[line_start - 1] != '\n') line_start--;
+                    
+                    int line_end = cursorPos;
+                    while (line_end < textLen && text[line_end] != '\n') line_end++;
+                    
+                    if (line_end < textLen) {
+                        int next_line_start = line_end + 1;
+                        int next_line_end = next_line_start;
+                        while (next_line_end < textLen && text[next_line_end] != '\n') next_line_end++;
+                        
+                        int col = cursorPos - line_start;
+                        int next_line_len = next_line_end - next_line_start;
+                        *ctx->cursorPos = next_line_start + (col < next_line_len ? col : next_line_len);
+                    }
+                }
+                // Enter/Return
+                else if (event.key.keysym.sym == SDLK_RETURN) {
+                    if (ctx->undo) {
+                        record_insert_action(ctx->undo, cursorPos, "\n", cursorPos, cursorPos + 1);
+                    }
+                    
+                    char *newText = malloc(textLen + 2);
+                    if (newText) {
+                        memcpy(newText, text, cursorPos);
+                        newText[cursorPos] = '\n';
+                        memcpy(newText + cursorPos + 1, text + cursorPos, textLen - cursorPos + 1);
+                        free(text);
+                        *ctx->editorText = newText;
+                        *ctx->cursorPos = cursorPos + 1;
+                        needsUpdate = true;
+                        
+                        if (ctx->document) mark_document_modified(ctx->document, true);
+                    }
+                }
+                
+                // Update render if needed
+                if (needsUpdate && ctx->renderer && ctx->font && ctx->text_area_x && 
+                    ctx->text_area_y && ctx->maxTextWidth) {
+                    update_render_data(ctx->renderer, ctx->font, *ctx->editorText,
+                                     *ctx->text_area_x, *ctx->text_area_y, *ctx->maxTextWidth, ctx->rd);
+                    if (ctx->rd->lazy_mode && ctx->text_area_height) {
+                        prepare_visible_texture(ctx->renderer, ctx->font, *ctx->editorText,
+                                              *ctx->text_area_x, *ctx->text_area_y, *ctx->maxTextWidth,
+                                              ctx->rd, ctx->rd->scrollY, *ctx->text_area_height);
+                    }
+                }
+            }
+#endif
         }
     }
 
@@ -274,10 +443,10 @@ static void *render_thread_func(void *arg)
 // Render a single frame
 static void render_frame(RenderContext *ctx)
 {
-#ifdef __EMSCRIPTEN__
-    EM_ASM({ console.log('[EMSCRIPTEN] render_frame start'); });
-    printf("[EMSCRIPTEN] render_frame start\n");
-#endif
+    /* Removed noisy per-frame logs - uncomment to debug rendering */
+    // EM_ASM({ console.log('[EMSCRIPTEN] render_frame start'); });
+    // printf("[EMSCRIPTEN] render_frame start\n");
+
     SDL_Renderer *renderer = ctx->renderer;
     TTF_Font *font = ctx->font;
     RenderData *rd = ctx->rd;
@@ -309,17 +478,17 @@ static void render_frame(RenderContext *ctx)
 
     if (content_changed || layout_changed || cursor_changed || selection_changed ||
         ctx->status_bar->needs_update || needs_update) {
-#ifdef __EMSCRIPTEN__
-        EM_ASM({ console.log('[EMSCRIPTEN] about to update_render_data'); });
-        printf("[EMSCRIPTEN] about to update_render_data\n");
-#endif
+        /* Removed noisy render logs - uncomment to debug rendering paths */
+        // EM_ASM({ console.log('[EMSCRIPTEN] about to update_render_data'); });
+        // printf("[EMSCRIPTEN] about to update_render_data\n");
+
         if (content_changed || layout_changed) {
             update_render_data(renderer, font, editorText, *ctx->text_area_x, *ctx->text_area_y,
                                *ctx->maxTextWidth, rd);
-#ifdef __EMSCRIPTEN__
-            EM_ASM({ console.log('[EMSCRIPTEN] update_render_data returned'); });
-            printf("[EMSCRIPTEN] update_render_data returned\n");
-#endif
+            /* Removed noisy render logs */
+            // EM_ASM({ console.log('[EMSCRIPTEN] update_render_data returned'); });
+            // printf("[EMSCRIPTEN] update_render_data returned\n");
+
             if (rd->lazy_mode) {
                 prepare_visible_texture(renderer, font, editorText, *ctx->text_area_x,
                                         *ctx->text_area_y, *ctx->maxTextWidth, rd, rd->scrollY,
@@ -348,10 +517,10 @@ static void render_frame(RenderContext *ctx)
     ctx->line_numbers->rect.y = 0;
 
     // Clear screen
-#ifdef __EMSCRIPTEN__
-    EM_ASM({ console.log('[EMSCRIPTEN] clearing screen'); });
-    printf("[EMSCRIPTEN] clearing screen\n");
-#endif
+    /* Removed noisy render logs */
+    // EM_ASM({ console.log('[EMSCRIPTEN] clearing screen'); });
+    // printf("[EMSCRIPTEN] clearing screen\n");
+
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
     SDL_SetRenderDrawColor(renderer, 22, 24, 32, 255);
     SDL_RenderClear(renderer);
@@ -370,8 +539,13 @@ static void render_frame(RenderContext *ctx)
     // Ensure scrollY is within valid bounds
     if (rd->scrollY < 0)
         rd->scrollY = 0;
-    if (rd->textH > 0 && rd->scrollY > rd->textH - *ctx->text_area_height)
-        rd->scrollY = rd->textH - *ctx->text_area_height;
+    if (rd->textH > 0 && *ctx->text_area_height > 0) {
+        int max_scroll = rd->textH - *ctx->text_area_height;
+        if (max_scroll < 0)
+            max_scroll = 0; // Text fits in viewport, no scrolling needed
+        if (rd->scrollY > max_scroll)
+            rd->scrollY = max_scroll;
+    }
 
     // Adjust scroll to make cursor visible (simple policy: if cursor above or below viewport, snap)
     int cursorY_for_scroll = rd->textRect.y + (cursor_line * cursor_font_height);
@@ -391,24 +565,33 @@ static void render_frame(RenderContext *ctx)
     // Render text using floating-point positioning for macOS-like precision
     if (rd && rd->textTexture && rd->textRect.w > 0 && rd->textRect.h > 0 && rd->textRect.x >= 0 &&
         rd->textRect.y >= 0) {
-#ifdef __EMSCRIPTEN__
-        EM_ASM({ console.log('[EMSCRIPTEN] about to render texture'); });
-        printf("[EMSCRIPTEN] about to render texture\n");
-#endif
+        /* Removed noisy render logs */
+        // EM_ASM({ console.log('[EMSCRIPTEN] about to render texture'); });
+        // printf("[EMSCRIPTEN] about to render texture\n");
+
         // Source rect selects the visible portion of the texture based on scrollY
-        SDL_Rect src = {0, rd->scrollY, rd->textRect.w, *ctx->text_area_height};
+        // Use the actual texture height, not viewport height, to avoid stretching
+        int src_h = rd->textRect.h < *ctx->text_area_height ? rd->textRect.h : *ctx->text_area_height;
+        SDL_Rect src = {0, rd->scrollY, rd->textRect.w, src_h};
         SDL_FRect dst = {(float) rd->textRect.x, (float) rd->textRect.y, (float) rd->textRect.w,
-                         (float) *ctx->text_area_height};
+                         (float) src_h};
+#ifdef __EMSCRIPTEN__
+        // Debug: log render dimensions to diagnose stretching
+        static int log_count = 0;
+        if (log_count++ < 3) {
+            printf("[DEBUG] Render: src={%d,%d,%d,%d} dst={%.0f,%.0f,%.0f,%.0f} tex={%d,%d}\n",
+                   src.x, src.y, src.w, src.h, dst.x, dst.y, dst.w, dst.h, rd->textRect.w, rd->textRect.h);
+        }
+#endif
         SDL_RenderCopyF(renderer, rd->textTexture, &src, &dst);
     }
 
     // Render selection highlight
     if (selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd) {
-#ifdef __EMSCRIPTEN__
-        EM_ASM({ console.log('[EMSCRIPTEN] rendering selection start=%d end=%d', $0, $1); },
-               selectionStart, selectionEnd);
-        printf("[EMSCRIPTEN] rendering selection start=%d end=%d\n", selectionStart, selectionEnd);
-#endif
+        /* Removed noisy selection render logs */
+        // EM_ASM({ console.log('[EMSCRIPTEN] rendering selection start=%d end=%d', $0, $1); }, selectionStart, selectionEnd);
+        // printf("[EMSCRIPTEN] rendering selection start=%d end=%d\n", selectionStart, selectionEnd);
+
         int startIdx = selectionStart < selectionEnd ? selectionStart : selectionEnd;
         int endIdx = selectionStart < selectionEnd ? selectionEnd : selectionStart;
         if (startIdx < rd->numClusters && endIdx < rd->numClusters) {
@@ -681,6 +864,31 @@ void display_text_window(const char *font_path, int font_size, const char *initi
     }
 #ifdef __EMSCRIPTEN__
     EM_ASM({ console.log('[EMSCRIPTEN] SDL_CreateWindow succeeded'); });
+    /* Make canvas focusable, attach key listeners for diagnosis, and ensure
+       clicking focuses it so keyboard events are delivered to SDL. */
+    EM_ASM({
+        var canvas = Module['canvas'] || document.querySelector('canvas');
+        if (canvas) {
+            canvas.setAttribute('tabindex', '0');
+            canvas.focus();
+            console.log('[EMSCRIPTEN] canvas focused for keyboard events');
+            
+            // Attach click listener to refocus on click
+            canvas.addEventListener('click', function() { 
+                canvas.focus(); 
+                console.log('[EMSCRIPTEN] canvas clicked and focused'); 
+            });
+            canvas.addEventListener('focus', function() { 
+                console.log('[EMSCRIPTEN] canvas focus event'); 
+            });
+        } else {
+            console.log('[EMSCRIPTEN] canvas not found');
+        }
+        
+        // REMOVED window-level key listeners that were blocking SDL
+        // SDL needs to receive events on the canvas, not have them
+        // intercepted at the window level
+    });
 #endif
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer) { /* error handling */
@@ -782,9 +990,32 @@ void display_text_window(const char *font_path, int font_size, const char *initi
     int search_buffer_pos = 0;
 
     // Start SDL text input.
+#ifdef __EMSCRIPTEN__
+    /* Under Emscripten, explicitly set SDL hints to ensure keyboard events
+       are captured from the canvas element. */
+    SDL_SetHint(SDL_HINT_EMSCRIPTEN_KEYBOARD_ELEMENT, "#canvas");
+#endif
     SDL_StartTextInput();
 
+#ifdef __EMSCRIPTEN__
+    /* Verify canvas focus and keyboard setup */
+    EM_ASM({
+        var canvas = Module['canvas'] || document.querySelector('canvas');
+        if (canvas) {
+            canvas.focus();
+            console.log('[EMSCRIPTEN] canvas focused, activeElement is:', document.activeElement === canvas);
+            console.log('[EMSCRIPTEN] SDL keyboard hint set and text input started');
+        } else {
+            console.log('[EMSCRIPTEN] ERROR: canvas not found');
+        }
+    });
+#endif
+
     // Initial render with line wrapping
+#ifdef __EMSCRIPTEN__
+    printf("[DEBUG] Before update_render_data: text_area_height=%d windowHeight=%d\n", 
+           text_area_height, windowHeight);
+#endif
     if (update_render_data(renderer, font, editorText, text_area_x, text_area_y, maxTextWidth,
                            &rd) != 0) {
         free(editorText);
@@ -1100,6 +1331,17 @@ void display_text_window(const char *font_path, int font_size, const char *initi
                             status_bar.needs_update =
                                 true; // Moved inside: update status bar if dimensions changed
                         }
+
+                    /* Debug key/text events to verify keyboard input arrives */
+                    if (event.type == SDL_TEXTINPUT) {
+                #ifdef __EMSCRIPTEN__
+                        EM_ASM({ console.log('[EMSCRIPTEN] SDL_TEXTINPUT ->', UTF8ToString($0)); }, event.text.text);
+                #endif
+                    } else if (event.type == SDL_KEYDOWN) {
+                #ifdef __EMSCRIPTEN__
+                        EM_ASM({ console.log('[EMSCRIPTEN] SDL_KEYDOWN sym=', $0, 'mod=', $1); }, event.key.keysym.sym, event.key.keysym.mod);
+                #endif
+                    }
                     }
                 } else if (event.type == SDL_TEXTINPUT && !search_mode) {
                     // Record undo action before modification

@@ -247,10 +247,15 @@ int prepare_visible_texture(SDL_Renderer *renderer, TTF_Font *font, const char *
     if (!renderer || !font || !utf8_text || !rd)
         return -1;
     // Create an empty surface sized to viewportWidth x viewportHeight
-    SDL_Surface *surface = SDL_CreateRGBSurface(0, rd->maxLineWidth ? rd->maxLineWidth : maxWidth,
-                                                viewportHeight, 32, 0, 0, 0, 0);
+
+    int surf_w = rd->maxLineWidth ? rd->maxLineWidth : maxWidth;
+    int surf_h = viewportHeight;
+    SDL_Surface *surface = SDL_CreateRGBSurface(0, surf_w, surf_h, 32, 0, 0, 0, 0);
     if (!surface)
         return -1;
+#ifdef __EMSCRIPTEN__
+    printf("[DEBUG] Created surface: w=%d h=%d pitch=%d bpp=%d\n", surface->w, surface->h, surface->pitch, surface->format->BytesPerPixel);
+#endif
 
     // Clear background
     SDL_FillRect(surface, NULL, SDL_MapRGB(surface->format, 22, 24, 32));
@@ -305,6 +310,11 @@ int prepare_visible_texture(SDL_Renderer *renderer, TTF_Font *font, const char *
         SDL_FreeSurface(surface);
         return -1;
     }
+#ifdef __EMSCRIPTEN__
+    int tex_w = 0, tex_h = 0;
+    SDL_QueryTexture(rd->textTexture, NULL, NULL, &tex_w, &tex_h);
+    printf("[DEBUG] Created texture: w=%d h=%d\n", tex_w, tex_h);
+#endif
     // Update rd->textRect to describe viewport-sized texture
     rd->textRect.x = x_offset;
     rd->textRect.y = y_offset;
@@ -682,10 +692,17 @@ int update_render_data(SDL_Renderer *renderer, TTF_Font *font, const char *utf8_
         SDL_FreeSurface(textSurface);
         return -1;
     }
+#ifdef __EMSCRIPTEN__
+    printf("[DEBUG] update_render_data created texture from surface w=%d h=%d\n", 
+           textSurface->w, textSurface->h);
+#endif
 
     // Verify texture dimensions are reasonable
     int tex_w, tex_h;
     if (SDL_QueryTexture(texture, NULL, NULL, &tex_w, &tex_h) == 0) {
+#ifdef __EMSCRIPTEN__
+        printf("[DEBUG] Texture query result: w=%d h=%d\n", tex_w, tex_h);
+#endif
         if (tex_w <= 0 || tex_h <= 0) {
             debug_print(L"[ERROR] Invalid texture dimensions: %d x %d\n", tex_w, tex_h);
             SDL_DestroyTexture(texture);
