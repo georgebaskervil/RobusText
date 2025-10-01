@@ -1,9 +1,11 @@
 # Build artifacts
 main
+RobusText
 *.o
 *.a
 *.so
 *.dylib
+build/
 
 # Debug information
 *.dSYM/
