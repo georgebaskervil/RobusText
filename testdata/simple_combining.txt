@@ -1,0 +1,54 @@
+Simple combiniStacking example:
+õ̭ (o + combining minus sign below + tilde)
+à̧ (a + cedilla + grave)
+ȩ̄̀ (e + cedilla + macron + grave - 3 marks)
+o̰̍̃ (o + tilde below + combining vertical line above + tilde - 3 marks)
+ạ̧̨̱̤̀́̂̃̄ (a + 9 combining marks)
+ứ̛̀̉̃̄ (u + horn + acute + grave + hook above + tilde + macron - 6 marks)
+
+Stacking above and below:
+ḛ̄̀ (e with breve below + macron + grave)
+ṳ́̄ (u with diaeresis below + acute + macron)
+ṉ̈̃ (n with line below + diaeresis + tilde)
+ḁ̊̀ (a with ring below + ring above + grave)
+ị̂̃ (i with dot below + circumflex + tilde)
+
+Complex Vietnamese example:
+ừ (u + horn + grave)
+ử (u + horn + hook above)
+ữ (u + horn + tilde)
+ự (u + horn + dot below)
+
+IPA phonetic stacking:
+ɛ̃̄̀ (epsilon + tilde + macron + grave)
+ɔ̣̃̂ (open o + dot below + tilde + circumflex)
+ə̃̄̀ (schwa + tilde + macron + grave)
+
+Zalgo-style (heavy combining):aracter test:
+
+Basic vowels with diacritics:
+á é í ó ú (acute accent)
+à è ì ò ù (grave accent)
+ä ë ï ö ü (diaeresis/umlaut)
+â ê î ô û (circumflex)
+ã õ ñ (tilde)
+
+Multiple combining marks:
+e̋ (e + double acute)
+ǫ́ (o with ogonek + acute)
+ę̃ (e with ogonek + tilde)
+
+Stacking example:
+õ̭ (o + combining minus sign below + tilde)
+à̧ (a + cedilla + grave)
+
+Zalgo-style (heavy combining):
+H̷̡̪̯ͨ͊̽̅̾̎Ȩ̬̩̾͛ͪ̈́̀́͘ ̶̧̨̱̹̭̯ͧ̾ͬC̷̙̲̝͖ͭ̏ͥͮ͟Oͮ͏̮̪̝͍M̲̖͊̒ͪͩͬ̚̚͜Ȇ̴̟̟͙̞ͩ͌͝S̨̥̫͎̭ͯ̿̔̀ͅ
+
+Hello world with combining:
+Ḧëllö Ẅöṙlḋ!
+
+Mathematical symbols with combining:
+x̄ (x-bar, mean)
+ẋ (x-dot, derivative)
+x⃗ (x-vector)

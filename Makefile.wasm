@@ -14,6 +14,7 @@ DEBUG_EMFLAGS := -s WASM=1 -s USE_SDL=2 -s USE_SDL_TTF=2 -s USE_FREETYPE=1 -s US
 			   -s ALLOW_MEMORY_GROWTH=1 -sSAFE_HEAP=1 -s ASSERTIONS=1 -s EXIT_RUNTIME=1
 
 PRELOAD := --preload-file Inter_18pt-Regular.ttf --preload-file testdata@/testdata
+SHELL_FILE := --shell-file shell.html
 
 .PHONY: all clean
 
@@ -27,7 +28,7 @@ $(TARGET_HTML): $(SOURCES)
 		echo "emcc not found. Install emsdk and activate it first."; exit 1; \
 	fi
 	mkdir -p $(TARGET_DIR)
-	$(CC) $(EMCFLAGS) $(EMFLAGS) $(PRELOAD) -o $(TARGET_HTML) $(SOURCES)
+	$(CC) $(EMCFLAGS) $(EMFLAGS) $(PRELOAD) $(SHELL_FILE) -o $(TARGET_HTML) $(SOURCES)
 	@echo "WASM build written to $(TARGET_HTML)"
 
 .PHONY: debug
@@ -37,7 +38,7 @@ debug: $(SOURCES)
 		echo "emcc not found. Install emsdk and activate it first."; exit 1; \
 	fi
 	mkdir -p $(TARGET_DIR)
-	$(CC) $(DEBUG_EMCFLAGS) $(DEBUG_EMFLAGS) $(PRELOAD) -o $(TARGET_DIR)/RobusText_debug.html $(SOURCES)
+	$(CC) $(DEBUG_EMCFLAGS) $(DEBUG_EMFLAGS) $(PRELOAD) $(SHELL_FILE) -o $(TARGET_DIR)/RobusText_debug.html $(SOURCES)
 	@echo "DEBUG WASM build written to $(TARGET_DIR)/RobusText_debug.html"
 
 clean:
