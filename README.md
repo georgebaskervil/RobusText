@@ -2,7 +2,13 @@
 
 RobusText is a **feature-complete text editor** built using SDL2 and SDL_ttf. What started as a lightweight text rendering project has evolved into a fully functional text editor with all the essential features users expect from modern text editing software.
 
-## 🎯 Complete Feature Set
+## � Try it Online
+
+**Live Demo**: [https://georgebaskervil.github.io/RobusText/](https://georgebaskervil.github.io/RobusText/)
+
+The WebAssembly version runs directly in your browser with full Unicode and combining character support. No installation required!
+
+## �🎯 Complete Feature Set
 
 ### Core Text Editing
 - **Unicode Support**: Full UTF-8 text input and rendering with combining characters
